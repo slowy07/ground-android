@@ -16,7 +16,6 @@
 
 # Loads the Docker image from the container registry and then runs the following steps:
 
-
 # Workflow:
 # --------
 #
@@ -28,19 +27,18 @@
 #
 
 steps:
-
-  - name: 'gcr.io/cloud-builders/gsutil'
-    id: &copy_gradle_cache 'Copying gradle cache'
-    waitFor: [ '-' ]
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: &copy_gradle_cache "Copying gradle cache"
+    waitFor: ["-"]
     # we use rsync and not cp so that this step doesn't fail the first time it's run
-    args: [ 'rsync', 'gs://${_CACHE_BUCKET}/', './' ]
+    args: ["rsync", "gs://${_CACHE_BUCKET}/", "./"]
 
-  - name: 'gcr.io/$PROJECT_ID/android:base'
-    id: &restore_gradle_cache 'Extracting tar'
+  - name: "gcr.io/$PROJECT_ID/android:base"
+    id: &restore_gradle_cache "Extracting tar"
     waitFor:
       - *copy_gradle_cache
     args:
-      - '-c'
+      - "-c"
       - |
         tar zxf cache.tgz || echo "No cache found"
 
@@ -49,78 +47,78 @@ steps:
   #
   # TODO: Remove this step when .git can be explicitly included in the tarball using .gcloudignore
   # https://github.com/GoogleCloudPlatform/cloud-builders/issues/401
-  - name: 'gcr.io/cloud-builders/git'
-    id: &create_git_dir 'Copy .git dir'
-    waitFor: [ '-' ]
-    entrypoint: 'bash'
+  - name: "gcr.io/cloud-builders/git"
+    id: &create_git_dir "Copy .git dir"
+    waitFor: ["-"]
+    entrypoint: "bash"
     args:
-      - '-c'
+      - "-c"
       - |
         git clone --branch master $_HEAD_REPO_URL tmp
         rm -rf .git
         mv tmp/.git .
         rm -rf tmp
 
-  - name: 'gcr.io/$PROJECT_ID/android:28'
-    id: &config_google_services 'Load debug google-services.json'
-    waitFor: [ '-' ]
-    entrypoint: 'bash'
+  - name: "gcr.io/$PROJECT_ID/android:28"
+    id: &config_google_services "Load debug google-services.json"
+    waitFor: ["-"]
+    entrypoint: "bash"
     args:
-      - '-c'
+      - "-c"
       - |
         gcloud secrets versions access latest --secret=$_GOOGLE_SERVICES_JSON --format='get(payload.data)' | tr '_-' '/+' | base64 -d > gnd/google-services.json
 
-  - name: 'gcr.io/$PROJECT_ID/android:28'
-    id: &assemble_debug 'Assemble debug apks'
+  - name: "gcr.io/$PROJECT_ID/android:28"
+    id: &assemble_debug "Assemble debug apks"
     waitFor:
       - *restore_gradle_cache
       - *create_git_dir
       - *config_google_services
     args:
-      - '-c'
+      - "-c"
       - |
         ./gradlew -PdisablePreDex --no-daemon assembleStaging assembleStagingUnitTest assembleStagingAndroidTest
 
   # Run code quality checks
-  - name: 'gcr.io/$PROJECT_ID/android:28'
-    id: &code_quality 'Run code quality checks'
+  - name: "gcr.io/$PROJECT_ID/android:28"
+    id: &code_quality "Run code quality checks"
     waitFor:
       - *assemble_debug
     args:
-      - '-c'
+      - "-c"
       - |
         ./gradlew -PdisablePreDex --no-daemon checkCode 2> check-logs.txt || echo "fail" > build-status.txt
         cat check-logs.txt
 
-  - name: 'gcr.io/$PROJECT_ID/android:28'
-    id: &unit_tests 'Run unit tests'
+  - name: "gcr.io/$PROJECT_ID/android:28"
+    id: &unit_tests "Run unit tests"
     waitFor:
       - *code_quality
     args:
-      - '-c'
+      - "-c"
       - |
         ./gradlew -PdisablePreDex --no-daemon testStagingUnitTest 2> unit-test-logs.txt || echo "fail" > build-status.txt
         cat unit-test-logs.txt
 
-  - name: 'gcr.io/$PROJECT_ID/android:28'
-    id: &authenticate_gcloud 'Authorize gcloud'
+  - name: "gcr.io/$PROJECT_ID/android:28"
+    id: &authenticate_gcloud "Authorize gcloud"
     waitFor:
       - *assemble_debug
-    entrypoint: 'bash'
+    entrypoint: "bash"
     args:
-      - '-c'
+      - "-c"
       - |
         gcloud secrets versions access latest --secret=$_SECRET_NAME --format='get(payload.data)' | tr '_-' '/+' | base64 -d > client-secret.json
         gcloud auth activate-service-account --key-file client-secret.json
 
   # For more details: https://cloud.google.com/sdk/gcloud/reference/alpha/firebase/test/android/run
-  - name: 'gcr.io/$PROJECT_ID/android:28'
-    id: &instrumented_tests 'Run instrumented tests'
+  - name: "gcr.io/$PROJECT_ID/android:28"
+    id: &instrumented_tests "Run instrumented tests"
     waitFor:
       - *authenticate_gcloud
-    entrypoint: 'bash'
+    entrypoint: "bash"
     args:
-      - '-c'
+      - "-c"
       - |
         gcloud --quiet beta firebase test android run \
         --type instrumentation --num-uniform-shards=1 \
@@ -131,23 +129,27 @@ steps:
         --results-dir "$BRANCH_NAME-$BUILD_ID/reports" \
         --timeout 20m
 
-  - name: 'gcr.io/cloud-builders/gsutil'
-    id: &save_reports 'Save reports to GCS'
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: &save_reports "Save reports to GCS"
     waitFor:
       - *unit_tests
       - *instrumented_tests
-    args: [ 'cp', '-r',
-            'gnd/build/reports',
-            'gs://${_ARTIFACT_BUCKET}/$BRANCH_NAME-$BUILD_ID/reports' ]
+    args:
+      [
+        "cp",
+        "-r",
+        "gnd/build/reports",
+        "gs://${_ARTIFACT_BUCKET}/$BRANCH_NAME-$BUILD_ID/reports",
+      ]
 
   # Update status badge and fail build if errors were found in "build" step
-  - name: 'gcr.io/cloud-builders/gsutil'
-    id: &update_status 'Update build status'
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: &update_status "Update build status"
     waitFor:
       - *save_reports
-    entrypoint: 'bash'
+    entrypoint: "bash"
     args:
-      - '-c'
+      - "-c"
       - |
         # Display artifact bucket link
         echo "Reports uploaded to https://console.cloud.google.com/storage/browser/${_ARTIFACT_BUCKET}/$BRANCH_NAME-$BUILD_ID/"
@@ -186,24 +188,24 @@ steps:
           exit 1
         fi
 
-  - name: 'gcr.io/$PROJECT_ID/android:base'
-    id: &build_cache 'Compress gradle build cache'
+  - name: "gcr.io/$PROJECT_ID/android:base"
+    id: &build_cache "Compress gradle build cache"
     waitFor:
       - *update_status
     args:
-      - '-c'
+      - "-c"
       - |
         tar zcf cache.tgz .gradle
 
-  - name: 'gcr.io/cloud-builders/gsutil'
-    id: &save_cache 'Save gradle cache to GCS'
+  - name: "gcr.io/cloud-builders/gsutil"
+    id: &save_cache "Save gradle cache to GCS"
     waitFor:
       - *build_cache
-    args: [ 'cp', 'cache.tgz', 'gs://${_CACHE_BUCKET}/cache.tgz' ]
+    args: ["cp", "cache.tgz", "gs://${_CACHE_BUCKET}/cache.tgz"]
 
 options:
   env:
-    - 'GRADLE_USER_HOME=/workspace/.gradle'
+    - "GRADLE_USER_HOME=/workspace/.gradle"
   logging: GCS_ONLY
 
 timeout: 1800s

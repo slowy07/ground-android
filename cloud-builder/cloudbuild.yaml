@@ -21,34 +21,33 @@
 # Based on https://github.com/GoogleCloudPlatform/cloud-builders-community
 
 steps:
-
   # Debian Docker image with commonly used and Android specific dependencies.
-  - name: 'gcr.io/cloud-builders/docker'
+  - name: "gcr.io/cloud-builders/docker"
     args:
-      - 'build'
-      - '--no-cache'
-      - '--tag=gcr.io/$PROJECT_ID/android:base'
-      - '--file=Dockerfile-base'
-      - '.'
+      - "build"
+      - "--no-cache"
+      - "--tag=gcr.io/$PROJECT_ID/android:base"
+      - "--file=Dockerfile-base"
+      - "."
 
   # Above generated Docker image +and Android SDK.
   # To create multiple Android versions, use _ANDROID_VERSION=<android version> as mentioned above.
-  - name: 'gcr.io/cloud-builders/docker'
+  - name: "gcr.io/cloud-builders/docker"
     args:
-      - 'build'
-      - '--no-cache'
-      - '--tag=gcr.io/$PROJECT_ID/android:${_ANDROID_VERSION}'
-      - '--build-arg'
-      - 'android_version=${_ANDROID_VERSION}'
-      - '--build-arg'
-      - 'project_id=$PROJECT_ID'
-      - '--file=Dockerfile-sdk'
-      - '.'
-      - '--cache-from'
-      - 'gcr.io/$PROJECT_ID/android:base'
+      - "build"
+      - "--no-cache"
+      - "--tag=gcr.io/$PROJECT_ID/android:${_ANDROID_VERSION}"
+      - "--build-arg"
+      - "android_version=${_ANDROID_VERSION}"
+      - "--build-arg"
+      - "project_id=$PROJECT_ID"
+      - "--file=Dockerfile-sdk"
+      - "."
+      - "--cache-from"
+      - "gcr.io/$PROJECT_ID/android:base"
 
 images:
-  - 'gcr.io/$PROJECT_ID/android:base'
-  - 'gcr.io/$PROJECT_ID/android:${_ANDROID_VERSION}'
+  - "gcr.io/$PROJECT_ID/android:base"
+  - "gcr.io/$PROJECT_ID/android:${_ANDROID_VERSION}"
 
 timeout: 2000s
