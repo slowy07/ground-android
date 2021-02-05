@@ -17,6 +17,7 @@
 package com.google.android.gnd.persistence.local.room.entity;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.room.ColumnInfo;
 import androidx.room.Embedded;
 import androidx.room.Entity;
@@ -26,6 +27,8 @@ import com.google.android.gnd.model.AuditInfo;
 import com.google.android.gnd.model.Project;
 import com.google.android.gnd.model.feature.Feature;
 import com.google.android.gnd.model.feature.FeatureMutation;
+import com.google.android.gnd.model.layer.Layer;
+import com.google.android.gnd.persistence.local.LocalDataConsistencyException;
 import com.google.android.gnd.persistence.local.room.models.Coordinates;
 import com.google.android.gnd.persistence.local.room.models.EntityState;
 import com.google.auto.value.AutoValue;
@@ -55,6 +58,11 @@ public abstract class FeatureEntity {
   @NonNull
   @ColumnInfo(name = "layer_id")
   public abstract String getLayerId();
+
+  @CopyAnnotations
+  @Nullable
+  @ColumnInfo(name = "geo_json")
+  public abstract String getGeoJson();
 
   // TODO: Rename to DeletionState.
   @CopyAnnotations
@@ -98,6 +106,7 @@ public abstract class FeatureEntity {
             .setId(feature.getId())
             .setProjectId(feature.getProject().getId())
             .setLayerId(feature.getLayer().getId())
+            .setGeoJson(feature.getGeoJsonString())
             .setLocation(Coordinates.fromPoint(feature.getPoint()))
             .setState(EntityState.DEFAULT)
             .setCreated(AuditInfoEntity.fromObject(feature.getCreated()))
@@ -105,13 +114,22 @@ public abstract class FeatureEntity {
     return entity.build();
   }
 
-  // TODO(#127): Decouple from Project and remove 2nd argument.
   public static Feature toFeature(FeatureEntity featureEntity, Project project) {
+    String id = featureEntity.getId();
+    String layerId = featureEntity.getLayerId();
+    Layer layer =
+        project
+            .getLayer(layerId)
+            .orElseThrow(
+                () ->
+                    new LocalDataConsistencyException(
+                        "Unknown layerId " + layerId + " in feature " + id));
     return Feature.newBuilder()
-        .setId(featureEntity.getId())
+        .setId(id)
         .setProject(project)
-        .setLayer(project.getLayer(featureEntity.getLayerId()).get())
+        .setLayer(layer)
         .setPoint(featureEntity.getLocation().toPoint())
+        .setGeoJsonString(featureEntity.getGeoJson())
         .setCreated(AuditInfoEntity.toObject(featureEntity.getCreated()))
         .setLastModified(AuditInfoEntity.toObject(featureEntity.getLastModified()))
         .build();
@@ -125,6 +143,7 @@ public abstract class FeatureEntity {
       String id,
       String projectId,
       String layerId,
+      String geoJson,
       EntityState state,
       Coordinates location,
       AuditInfoEntity created,
@@ -133,6 +152,7 @@ public abstract class FeatureEntity {
         .setId(id)
         .setProjectId(projectId)
         .setLayerId(layerId)
+        .setGeoJson(geoJson)
         .setState(state)
         .setLocation(location)
         .setCreated(created)
@@ -152,6 +172,8 @@ public abstract class FeatureEntity {
     public abstract Builder setProjectId(String newProjectId);
 
     public abstract Builder setLayerId(String newLayerId);
+
+    public abstract Builder setGeoJson(String newGeoJson);
 
     public abstract Builder setState(EntityState newState);
 

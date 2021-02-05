@@ -18,6 +18,7 @@ package com.google.android.gnd.ui.editobservation;
 
 import static androidx.lifecycle.LiveDataReactiveStreams.fromPublisher;
 import static com.google.android.gnd.persistence.remote.firestore.FirestoreStorageManager.getRemoteDestinationPath;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.app.Application;
 import android.content.res.Resources;
@@ -40,6 +41,7 @@ import com.google.android.gnd.persistence.uuid.OfflineUuidGenerator;
 import com.google.android.gnd.repository.ObservationRepository;
 import com.google.android.gnd.rx.Event;
 import com.google.android.gnd.rx.Nil;
+import com.google.android.gnd.rx.annotations.Hot;
 import com.google.android.gnd.system.CameraManager;
 import com.google.android.gnd.system.StorageManager;
 import com.google.android.gnd.ui.common.AbstractViewModel;
@@ -48,6 +50,7 @@ import com.google.common.collect.ImmutableMap;
 import io.reactivex.Completable;
 import io.reactivex.Single;
 import io.reactivex.processors.BehaviorProcessor;
+import io.reactivex.processors.FlowableProcessor;
 import io.reactivex.processors.PublishProcessor;
 import java.util.Map;
 import java8.util.Optional;
@@ -55,55 +58,45 @@ import javax.annotation.Nullable;
 import javax.inject.Inject;
 import timber.log.Timber;
 
-// TODO: Save draft to local db on each change.
 public class EditObservationViewModel extends AbstractViewModel {
 
-  // TODO: Move out of id and into fragment args.
-  private static final String ADD_OBSERVATION_ID_PLACEHOLDER = "NEW";
-
   // Injected inputs.
+  /** True if observation is currently being loaded, otherwise false. */
+  @Hot(replays = true)
+  public final MutableLiveData<Boolean> isLoading = new MutableLiveData<>(false);
+  /** True if observation is currently being saved, otherwise false. */
+  @Hot(replays = true)
+  public final MutableLiveData<Boolean> isSaving = new MutableLiveData<>(false);
 
   private final ObservationRepository observationRepository;
   private final Resources resources;
   private final StorageManager storageManager;
+
+  // Input events.
   private final CameraManager cameraManager;
   private final OfflineUuidGenerator uuidGenerator;
 
-  // Input events.
-
-  /** Arguments passed in from view on initialize(). */
-  private final BehaviorProcessor<EditObservationFragmentArgs> viewArgs =
-      BehaviorProcessor.create();
-
-  /** "Save" button clicks. */
-  private final PublishProcessor<Nil> saveClicks = PublishProcessor.create();
-
   // View state streams.
-
+  /** Arguments passed in from view on initialize(). */
+  @Hot(replays = true)
+  private final FlowableProcessor<EditObservationFragmentArgs> viewArgs =
+      BehaviorProcessor.create();
+  /** "Save" button clicks. */
+  @Hot private final PublishProcessor<Nil> saveClicks = PublishProcessor.create();
   /** Form definition, loaded when view is initialized. */
   private final LiveData<Form> form;
-
   /** Toolbar title, based on whether user is adding new or editing existing observation. */
+  @Hot(replays = true)
   private final MutableLiveData<String> toolbarTitle = new MutableLiveData<>();
-
   /** Stream of updates to photo fields. */
+  @Hot(replays = true)
   private final MutableLiveData<ImmutableMap<Field, String>> photoUpdates = new MutableLiveData<>();
-
   /** Original form responses, loaded when view is initialized. */
   private final ObservableMap<String, Response> responses = new ObservableArrayMap<>();
-
-  /** Form validation errors, updated when existing for loaded and when responses change. */
-  @Nullable private Map<String, String> validationErrors;
-
-  /** True if observation is currently being loaded, otherwise false. */
-  public final MutableLiveData<Boolean> isLoading = new MutableLiveData<>(false);
-
-  /** True if observation is currently being saved, otherwise false. */
-  public final MutableLiveData<Boolean> isSaving = new MutableLiveData<>(false);
-
   /** Outcome of user clicking "Save". */
   private final LiveData<Event<SaveResult>> saveResults;
-
+  /** Form validation errors, updated when existing for loaded and when responses change. */
+  @Nullable private Map<String, String> validationErrors;
   /** Observation state loaded when view is initialized. */
   @Nullable private Observation originalObservation;
 
@@ -128,7 +121,7 @@ public class EditObservationViewModel extends AbstractViewModel {
   }
 
   private static boolean isAddObservationRequest(EditObservationFragmentArgs args) {
-    return args.getObservationId().equals(ADD_OBSERVATION_ID_PLACEHOLDER);
+    return args.getObservationId().isEmpty();
   }
 
   public LiveData<Form> getForm() {
@@ -149,7 +142,11 @@ public class EditObservationViewModel extends AbstractViewModel {
 
   Optional<Response> getSavedOrOriginalResponse(String fieldId) {
     if (responses.isEmpty()) {
-      return originalObservation.getResponses().getResponse(fieldId);
+      if (originalObservation == null) {
+        return Optional.empty();
+      } else {
+        return originalObservation.getResponses().getResponse(fieldId);
+      }
     } else {
       return getResponse(fieldId);
     }
@@ -198,6 +195,10 @@ public class EditObservationViewModel extends AbstractViewModel {
 
   private Completable saveBitmapAndUpdateResponse(Bitmap bitmap, Field field) {
     String localFileName = uuidGenerator.generateUuid() + Config.PHOTO_EXT;
+
+    checkNotNull(
+        originalObservation, "originalObservation was empty when attempting to save bitmap");
+
     String remoteDestinationPath =
         getRemoteDestinationPath(
             originalObservation.getProject().getId(),

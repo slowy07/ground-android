@@ -57,7 +57,7 @@
       app:destination="@id/edit_observation_fragment">
       <argument
         android:name="observationId"
-        android:defaultValue="NEW" />
+        android:defaultValue="" />
     </action>
     <action
       android:id="@+id/fromHomeScreenToSignInScreen"
@@ -74,9 +74,9 @@
 
   <fragment
     android:id="@+id/offline_areas_fragment"
-    android:name="com.google.android.gnd.ui.offlinearea.OfflineAreasFragment"
-    android:label="@string/offline_areas"
-    tools:layout="@layout/offline_areas_frag">
+    android:name="com.google.android.gnd.ui.offlinebasemap.OfflineBaseMapsFragment"
+    android:label="@string/offline_base_maps"
+    tools:layout="@layout/offline_base_maps_frag">
     <action
       android:id="@+id/showOfflineAreaSelector"
       app:destination="@id/offline_area_selector_fragment" />
@@ -85,25 +85,25 @@
       app:destination="@id/home_screen_fragment" />
     <action
       android:id="@+id/viewOfflineArea"
-      app:destination="@+id/offline_area_viewer_fragment"/>
+      app:destination="@+id/offline_area_viewer_fragment" />
   </fragment>
   <fragment
     android:id="@+id/offline_area_selector_fragment"
-    android:name="com.google.android.gnd.ui.offlinearea.selector.OfflineAreaSelectorFragment"
-    android:label="@string/offline_area_selector"
-    tools:layout="@layout/offline_area_selector_frag">
+    android:name="com.google.android.gnd.ui.offlinebasemap.selector.OfflineBaseMapSelectorFragment"
+    android:label="@string/offline_base_map_selector"
+    tools:layout="@layout/offline_base_map_selector_frag">
     <action
       android:id="@+id/backToOfflineAreas"
       app:destination="@id/offline_areas_fragment" />
   </fragment>
   <fragment
     android:id="@+id/offline_area_viewer_fragment"
-    android:name="com.google.android.gnd.ui.offlinearea.viewer.OfflineAreaViewerFragment"
-    android:label="@string/offline_area_viewer_navgraph_label"
-    tools:layout="@layout/offline_area_viewer_frag">
+    android:name="com.google.android.gnd.ui.offlinebasemap.viewer.OfflineBaseMapViewerFragment"
+    android:label="@string/offline_base_map_viewer_navgraph_label"
+    tools:layout="@layout/offline_base_map_viewer_frag">
     <argument
       android:name="offlineAreaId"
-      app:argType="string"/>
+      app:argType="string" />
   </fragment>
   <fragment
     android:id="@+id/observation_details_fragment"
@@ -153,16 +153,18 @@
     android:id="@+id/sign_in_fragment"
     android:name="com.google.android.gnd.ui.signin.SignInFragment"
     android:label="sign_in_frag"
-    tools:layout="@layout/sign_in_frag">
-    <action
-      android:id="@+id/proceedToHomeScreen"
-      app:destination="@id/home_screen_fragment"
-      app:popUpTo="@id/navGraph"
-      app:popUpToInclusive="true" />
-  </fragment>
+    tools:layout="@layout/sign_in_frag"></fragment>
   <activity
     android:id="@+id/settings_activity"
     android:name="com.google.android.gnd.SettingsActivity"
     android:label="settings_activity"
     tools:layout="@layout/settings_activity" />
+  <action
+    android:id="@+id/showSignInScreen"
+    app:destination="@id/sign_in_fragment"
+    app:popUpTo="@id/navGraph" />
+  <action
+    android:id="@+id/showHomeScreen"
+    app:destination="@id/home_screen_fragment"
+    app:popUpTo="@id/navGraph" />
 </navigation>

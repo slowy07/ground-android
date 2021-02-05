@@ -32,6 +32,7 @@ import com.google.android.gnd.R;
 import com.google.android.gnd.databinding.ObservationDetailsFieldBinding;
 import com.google.android.gnd.databinding.ObservationDetailsFragBinding;
 import com.google.android.gnd.databinding.PhotoFieldBinding;
+import com.google.android.gnd.model.feature.Feature;
 import com.google.android.gnd.model.form.Element;
 import com.google.android.gnd.model.form.Field;
 import com.google.android.gnd.model.form.Field.Type;
@@ -40,16 +41,20 @@ import com.google.android.gnd.model.observation.Response;
 import com.google.android.gnd.rx.Loadable;
 import com.google.android.gnd.ui.common.AbstractFragment;
 import com.google.android.gnd.ui.common.EphemeralPopups;
+import com.google.android.gnd.ui.common.FeatureHelper;
 import com.google.android.gnd.ui.common.Navigator;
 import com.google.android.gnd.ui.editobservation.PhotoFieldViewModel;
 import dagger.hilt.android.AndroidEntryPoint;
+import java8.util.Optional;
 import javax.inject.Inject;
 import timber.log.Timber;
 
 @AndroidEntryPoint
 public class ObservationDetailsFragment extends AbstractFragment {
 
+  @Inject FeatureHelper featureHelper;
   @Inject Navigator navigator;
+  @Inject EphemeralPopups popups;
 
   private ObservationDetailsViewModel viewModel;
   private ObservationDetailsFragBinding binding;
@@ -65,16 +70,17 @@ public class ObservationDetailsFragment extends AbstractFragment {
 
   @Override
   public View onCreateView(
-      @NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+      LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
     super.onCreateView(inflater, container, savedInstanceState);
     binding = ObservationDetailsFragBinding.inflate(inflater, container, false);
+    binding.setFragment(this);
     binding.setViewModel(viewModel);
     binding.setLifecycleOwner(this);
     return binding.getRoot();
   }
 
   @Override
-  public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+  public void onViewCreated(View view, @Nullable Bundle savedInstanceState) {
     super.onViewCreated(view, savedInstanceState);
     ((MainActivity) getActivity()).setActionBar(binding.observationDetailsToolbar, false);
   }
@@ -99,7 +105,7 @@ public class ObservationDetailsFragment extends AbstractFragment {
       case ERROR:
         // TODO: Replace w/error view?
         Timber.e("Failed to load observation");
-        EphemeralPopups.showError(getContext());
+        popups.showError();
         break;
       default:
         Timber.e("Unhandled state: %s", observation.getState());
@@ -156,7 +162,9 @@ public class ObservationDetailsFragment extends AbstractFragment {
       case R.id.edit_observation_menu_item:
         // This is required to prevent menu from reappearing on back.
         getActivity().closeOptionsMenu();
-        navigator.editObservation(projectId, featureId, observationId);
+        navigator.navigate(
+            ObservationDetailsFragmentDirections.editObservation(
+                projectId, featureId, observationId));
         return true;
       case R.id.delete_observation_menu_item:
         viewModel
@@ -167,6 +175,14 @@ public class ObservationDetailsFragment extends AbstractFragment {
       default:
         return false;
     }
+  }
+
+  public String getFeatureTitle(@Nullable Optional<Feature> feature) {
+    return feature == null ? "" : featureHelper.getTitle(feature);
+  }
+
+  public String getFeatureSubtitle(@Nullable Optional<Feature> feature) {
+    return feature == null ? "" : featureHelper.getCreatedBy(feature);
   }
 
   private ObservationDetailsFragmentArgs getObservationDetailFragmentArgs() {

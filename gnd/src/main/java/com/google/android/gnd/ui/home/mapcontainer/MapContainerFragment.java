@@ -28,10 +28,14 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.StringRes;
-import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog.Builder;
 import com.google.android.gnd.R;
 import com.google.android.gnd.databinding.MapContainerFragBinding;
 import com.google.android.gnd.model.Project;
+import com.google.android.gnd.model.feature.Feature;
+import com.google.android.gnd.model.feature.Point;
+import com.google.android.gnd.persistence.geojson.GeoJsonParser;
+import com.google.android.gnd.persistence.local.LocalValueStore;
 import com.google.android.gnd.rx.BooleanOrError;
 import com.google.android.gnd.rx.Loadable;
 import com.google.android.gnd.system.PermissionsManager.PermissionDeniedException;
@@ -39,38 +43,30 @@ import com.google.android.gnd.system.SettingsManager.SettingsChangeRequestCancel
 import com.google.android.gnd.ui.common.AbstractFragment;
 import com.google.android.gnd.ui.home.BottomSheetState;
 import com.google.android.gnd.ui.home.HomeScreenViewModel;
+import com.google.android.gnd.ui.home.mapcontainer.MapContainerViewModel.Mode;
 import com.google.android.gnd.ui.map.MapAdapter;
 import com.google.android.gnd.ui.map.MapProvider;
+import com.google.android.gnd.ui.util.FileUtil;
 import dagger.hilt.android.AndroidEntryPoint;
 import io.reactivex.Single;
+import java8.util.Optional;
 import javax.inject.Inject;
 import timber.log.Timber;
 
 /** Main app view, displaying the map and related controls (center cross-hairs, add button, etc). */
 @AndroidEntryPoint
 public class MapContainerFragment extends AbstractFragment {
+
   private static final String MAP_FRAGMENT_KEY = MapProvider.class.getName() + "#fragment";
 
+  @Inject FileUtil fileUtil;
+  @Inject GeoJsonParser geoJsonParser;
   @Inject MapProvider mapProvider;
+  @Inject LocalValueStore localValueStore;
 
   private MapContainerViewModel mapContainerViewModel;
   private HomeScreenViewModel homeScreenViewModel;
   private MapContainerFragBinding binding;
-
-  private void showMapTypeSelectorDialog() {
-    new AlertDialog.Builder(getContext())
-        .setTitle(R.string.select_map_type)
-        .setSingleChoiceItems(
-            mapProvider.getMapTypes().values().toArray(new String[0]),
-            mapProvider.getMapType(),
-            (dialog, which) -> {
-              mapProvider.setMapType(which);
-              dialog.dismiss();
-            })
-        .setCancelable(true)
-        .create()
-        .show();
-  }
 
   @Override
   public void onCreate(@Nullable Bundle savedInstanceState) {
@@ -90,13 +86,15 @@ public class MapContainerFragment extends AbstractFragment {
         .as(disposeOnDestroy(this))
         .subscribe(homeScreenViewModel::onMarkerClick);
     mapAdapter
-        .toObservable()
+        .toFlowable()
         .flatMap(MapAdapter::getDragInteractions)
+        .onBackpressureLatest()
         .as(disposeOnDestroy(this))
         .subscribe(mapContainerViewModel::onMapDrag);
     mapAdapter
-        .toObservable()
+        .toFlowable()
         .flatMap(MapAdapter::getCameraMoves)
+        .onBackpressureLatest()
         .as(disposeOnDestroy(this))
         .subscribe(mapContainerViewModel::onCameraMove);
     mapAdapter
@@ -108,7 +106,7 @@ public class MapContainerFragment extends AbstractFragment {
 
   @Override
   public View onCreateView(
-      @NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+      LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
     binding = MapContainerFragBinding.inflate(inflater, container, false);
     binding.setViewModel(mapContainerViewModel);
     binding.setHomeScreenViewModel(homeScreenViewModel);
@@ -117,7 +115,7 @@ public class MapContainerFragment extends AbstractFragment {
   }
 
   @Override
-  public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+  public void onViewCreated(View view, @Nullable Bundle savedInstanceState) {
     super.onViewCreated(view, savedInstanceState);
 
     disableAddFeatureBtn();
@@ -127,37 +125,83 @@ public class MapContainerFragment extends AbstractFragment {
     } else {
       mapProvider.restore(restoreChildFragment(savedInstanceState, MAP_FRAGMENT_KEY));
     }
-
-    mapContainerViewModel
-        .getShowMapTypeSelectorRequests()
-        .observe(getViewLifecycleOwner(), __ -> showMapTypeSelectorDialog());
   }
 
   private void onMapReady(MapAdapter map) {
     Timber.d("MapAdapter ready. Updating subscriptions");
     // Observe events emitted by the ViewModel.
-    mapContainerViewModel.getMapPins().observe(this, map::setMapPins);
+    mapContainerViewModel.getMapFeatures().observe(this, map::setMapFeatures);
     mapContainerViewModel
         .getLocationLockState()
         .observe(this, state -> onLocationLockStateChange(state, map));
     mapContainerViewModel
         .getCameraUpdateRequests()
-        .observe(this, update -> onCameraUpdate(update, map));
-    mapContainerViewModel.getActiveProject().observe(this, this::onProjectChange);
+        .observe(this, update -> update.ifUnhandled(data -> onCameraUpdate(data, map)));
+    mapContainerViewModel.getProjectLoadingState().observe(this, this::onProjectChange);
     homeScreenViewModel
         .getBottomSheetState()
         .observe(this, state -> onBottomSheetStateChange(state, map));
-    binding.addFeatureBtn.setOnClickListener(
+    binding.mapControls.addFeatureBtn.setOnClickListener(
         __ -> homeScreenViewModel.onAddFeatureBtnClick(map.getCameraTarget()));
+    binding.moveFeature.confirmButton.setOnClickListener(
+        __ -> showConfirmationDialog(map.getCameraTarget()));
+    binding.moveFeature.cancelButton.setOnClickListener(__ -> setDefaultMode());
     enableLocationLockBtn();
     mapContainerViewModel.getMbtilesFilePaths().observe(this, map::addTileOverlays);
+    mapContainerViewModel
+        .getSelectMapTypeClicks()
+        .observe(
+            getViewLifecycleOwner(), action -> action.ifUnhandled(this::showMapTypeSelectorDialog));
+
+    // TODO: Do this the RxJava way
+    map.moveCamera(mapContainerViewModel.getCameraPosition().getValue());
+  }
+
+  private void showMapTypeSelectorDialog() {
+    new Builder(getContext())
+        .setTitle(R.string.select_map_type)
+        .setSingleChoiceItems(
+            mapProvider.getMapTypes().values().toArray(new String[0]),
+            mapProvider.getMapType(),
+            (dialog, which) -> {
+              mapProvider.setMapType(which);
+              localValueStore.saveMapType(which);
+              dialog.dismiss();
+            })
+        .setCancelable(true)
+        .create()
+        .show();
+  }
+
+  private void showConfirmationDialog(Point point) {
+    new Builder(getContext())
+        .setTitle(R.string.move_point_confirmation)
+        .setPositiveButton(android.R.string.ok, (dialog, which) -> moveToNewPosition(point))
+        .setNegativeButton(android.R.string.cancel, (dialog, which) -> setDefaultMode())
+        .setCancelable(true)
+        .create()
+        .show();
+  }
+
+  private void moveToNewPosition(Point point) {
+    mapContainerViewModel
+        .getSelectedFeature()
+        .map(feature -> feature.toBuilder().setPoint(point).build())
+        .ifPresentOrElse(
+            feature -> homeScreenViewModel.updateFeature(feature),
+            () -> Timber.e("No feature selected"));
   }
 
   private void onBottomSheetStateChange(BottomSheetState state, MapAdapter map) {
     switch (state.getVisibility()) {
       case VISIBLE:
         map.disable();
-        mapContainerViewModel.panAndZoomCamera(state.getFeature().getPoint());
+        state
+            .getFeature()
+            .ifPresent(
+                feature -> {
+                  mapContainerViewModel.panAndZoomCamera(feature.getPoint());
+                });
         break;
       case HIDDEN:
         map.enable();
@@ -177,18 +221,18 @@ public class MapContainerFragment extends AbstractFragment {
   }
 
   private void enableLocationLockBtn() {
-    binding.locationLockBtn.setEnabled(true);
+    binding.mapControls.locationLockBtn.setEnabled(true);
   }
 
   private void enableAddFeatureBtn() {
-    binding.addFeatureBtn.setBackgroundTintList(
+    binding.mapControls.addFeatureBtn.setBackgroundTintList(
         ColorStateList.valueOf(getResources().getColor(R.color.colorMapAccent)));
   }
 
   private void disableAddFeatureBtn() {
     // NOTE: We don't call addFeatureBtn.setEnabled(false) here since calling it before the fab is
     // shown corrupts its padding when used with useCompatPadding="true".
-    binding.addFeatureBtn.setBackgroundTintList(
+    binding.mapControls.addFeatureBtn.setBackgroundTintList(
         ColorStateList.valueOf(getResources().getColor(R.color.colorGrey500)));
   }
 
@@ -197,10 +241,8 @@ public class MapContainerFragment extends AbstractFragment {
     if (result.isTrue()) {
       Timber.d("Location lock enabled");
       map.enableCurrentLocationIndicator();
-      binding.locationLockBtn.setImageResource(R.drawable.ic_gps_blue);
     } else {
       Timber.d("Location lock disabled");
-      binding.locationLockBtn.setImageResource(R.drawable.ic_gps_grey600);
     }
   }
 
@@ -237,5 +279,17 @@ public class MapContainerFragment extends AbstractFragment {
   public void onDestroy() {
     mapContainerViewModel.closeProviders();
     super.onDestroy();
+  }
+
+  public void setDefaultMode() {
+    mapContainerViewModel.setViewMode(Mode.DEFAULT);
+    mapContainerViewModel.setSelectedFeature(Optional.empty());
+  }
+
+  public void setRepositionMode(Optional<Feature> feature) {
+    mapContainerViewModel.setViewMode(Mode.REPOSITION);
+    mapContainerViewModel.setSelectedFeature(feature);
+
+    Toast.makeText(getContext(), R.string.move_point_hint, Toast.LENGTH_SHORT).show();
   }
 }

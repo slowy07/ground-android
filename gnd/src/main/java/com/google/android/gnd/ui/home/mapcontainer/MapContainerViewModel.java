@@ -16,27 +16,35 @@
 
 package com.google.android.gnd.ui.home.mapcontainer;
 
+import static android.view.View.GONE;
+import static android.view.View.VISIBLE;
 import static com.google.android.gnd.util.ImmutableSetCollector.toImmutableSet;
 import static java8.util.stream.StreamSupport.stream;
 
+import androidx.annotation.NonNull;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.LiveDataReactiveStreams;
 import androidx.lifecycle.MutableLiveData;
 import com.cocoahero.android.gmaps.addons.mapbox.MapBoxOfflineTileProvider;
+import com.google.android.gnd.R;
 import com.google.android.gnd.model.Project;
 import com.google.android.gnd.model.basemap.tile.TileSource;
 import com.google.android.gnd.model.feature.Feature;
 import com.google.android.gnd.model.feature.Point;
 import com.google.android.gnd.repository.FeatureRepository;
-import com.google.android.gnd.repository.OfflineAreaRepository;
+import com.google.android.gnd.repository.OfflineBaseMapRepository;
 import com.google.android.gnd.repository.ProjectRepository;
+import com.google.android.gnd.rx.Action;
 import com.google.android.gnd.rx.BooleanOrError;
 import com.google.android.gnd.rx.Event;
 import com.google.android.gnd.rx.Loadable;
-import com.google.android.gnd.rx.Nil;
+import com.google.android.gnd.rx.annotations.Hot;
 import com.google.android.gnd.system.LocationManager;
 import com.google.android.gnd.ui.common.AbstractViewModel;
 import com.google.android.gnd.ui.common.SharedViewModel;
+import com.google.android.gnd.ui.map.CameraPosition;
+import com.google.android.gnd.ui.map.MapFeature;
+import com.google.android.gnd.ui.map.MapGeoJson;
 import com.google.android.gnd.ui.map.MapPin;
 import com.google.common.collect.ImmutableSet;
 import io.reactivex.BackpressureStrategy;
@@ -45,77 +53,147 @@ import io.reactivex.subjects.PublishSubject;
 import io.reactivex.subjects.Subject;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java8.util.Optional;
 import javax.inject.Inject;
+import org.json.JSONException;
+import org.json.JSONObject;
 import timber.log.Timber;
 
 @SharedViewModel
 public class MapContainerViewModel extends AbstractViewModel {
 
-  private static final float DEFAULT_ZOOM_LEVEL = 20.0f;
-  private final LiveData<Loadable<Project>> activeProject;
-  private final LiveData<ImmutableSet<MapPin>> mapPins;
+  // A note on Zoom levels: The higher the number the more zoomed in the map will be.
+  // 0.0f is fully zoomed out.
+  private static final float DEFAULT_FEATURE_ZOOM_LEVEL = 20.0f;
+  private static final float DEFAULT_MAP_ZOOM_LEVEL = 0.0f;
+  private static final Point DEFAULT_MAP_POINT =
+      Point.newBuilder().setLatitude(0.0).setLongitude(0.0).build();
+
+  private final LiveData<Loadable<Project>> projectLoadingState;
+  private final LiveData<ImmutableSet<MapFeature>> mapFeatures;
   private final LiveData<BooleanOrError> locationLockState;
-  private final LiveData<CameraUpdate> cameraUpdateRequests;
-  private final MutableLiveData<Point> cameraPosition;
+  private final LiveData<Event<CameraUpdate>> cameraUpdateRequests;
+
+  @Hot(replays = true)
+  private final MutableLiveData<CameraPosition> cameraPosition =
+      new MutableLiveData<>(new CameraPosition(DEFAULT_MAP_POINT, DEFAULT_MAP_ZOOM_LEVEL));
+
   private final LocationManager locationManager;
   private final FeatureRepository featureRepository;
-  private final Subject<Boolean> locationLockChangeRequests;
-  private final Subject<CameraUpdate> cameraUpdateSubject;
-  private final MutableLiveData<Event<Nil>> showMapTypeSelectorRequests = new MutableLiveData<>();
+
+  @Hot private final Subject<Boolean> locationLockChangeRequests = PublishSubject.create();
+  @Hot private final Subject<CameraUpdate> cameraUpdateSubject = PublishSubject.create();
+
+  @Hot(replays = true)
+  private final MutableLiveData<Integer> mapControlsVisibility = new MutableLiveData<>(VISIBLE);
+
+  @Hot(replays = true)
+  private final MutableLiveData<Integer> moveFeaturesVisibility = new MutableLiveData<>(GONE);
+
+  @Hot(replays = true)
+  private final MutableLiveData<Action> selectMapTypeClicks = new MutableLiveData<>();
+
   private final LiveData<ImmutableSet<String>> mbtilesFilePaths;
-  // TODO: Create our own wrapper/interface for MbTiles providers
-  // The impl we're using unfortunately requires calling a `close` method explicitly
-  // to clean up provider resources; `close` however, is not defined by the `TileProvider`
-  // interface, preventing us from treating providers generically.
+  private final LiveData<Integer> iconTint;
   private final List<MapBoxOfflineTileProvider> tileProviders = new ArrayList<>();
+
+  // Feature currently selected for repositioning
+  private Optional<Feature> selectedFeature = Optional.empty();
 
   @Inject
   MapContainerViewModel(
       ProjectRepository projectRepository,
       FeatureRepository featureRepository,
       LocationManager locationManager,
-      OfflineAreaRepository offlineAreaRepository) {
+      OfflineBaseMapRepository offlineBaseMapRepository) {
+    // THIS SHOULD NOT BE CALLED ON CONFIG CHANGE
     this.featureRepository = featureRepository;
     this.locationManager = locationManager;
-    this.locationLockChangeRequests = PublishSubject.create();
-    this.cameraUpdateSubject = PublishSubject.create();
 
     Flowable<BooleanOrError> locationLockStateFlowable = createLocationLockStateFlowable().share();
     this.locationLockState =
         LiveDataReactiveStreams.fromPublisher(
             locationLockStateFlowable.startWith(BooleanOrError.falseValue()));
+    this.iconTint =
+        LiveDataReactiveStreams.fromPublisher(
+            locationLockStateFlowable
+                .map(locked -> locked.isTrue() ? R.color.colorMapBlue : R.color.colorGrey800)
+                .startWith(R.color.colorGrey800));
     this.cameraUpdateRequests =
         LiveDataReactiveStreams.fromPublisher(
             createCameraUpdateFlowable(locationLockStateFlowable));
-    this.cameraPosition = new MutableLiveData<>();
-    this.activeProject =
-        LiveDataReactiveStreams.fromPublisher(projectRepository.getActiveProjectOnceAndStream());
+    this.projectLoadingState =
+        LiveDataReactiveStreams.fromPublisher(projectRepository.getProjectLoadingState());
     // TODO: Clear feature markers when project is deactivated.
     // TODO: Since we depend on project stream from repo anyway, this transformation can be moved
     // into the repo?
-    this.mapPins =
+    this.mapFeatures =
         LiveDataReactiveStreams.fromPublisher(
             projectRepository
-                .getActiveProjectOnceAndStream()
-                .map(Loadable::value)
+                .getActiveProject()
                 .switchMap(this::getFeaturesStream)
-                .map(MapContainerViewModel::toMapPins));
+                .map(MapContainerViewModel::toMapFeatures));
     this.mbtilesFilePaths =
         LiveDataReactiveStreams.fromPublisher(
-            offlineAreaRepository
+            offlineBaseMapRepository
                 .getDownloadedTileSourcesOnceAndStream()
                 .map(set -> stream(set).map(TileSource::getPath).collect(toImmutableSet())));
   }
 
-  private Flowable<CameraUpdate> createCameraUpdateFlowable(
+  private static ImmutableSet<MapFeature> toMapFeatures(ImmutableSet<Feature> features) {
+    ImmutableSet<MapFeature> mapPins =
+        stream(features)
+            .filter(Feature::isPoint)
+            .map(MapContainerViewModel::toMapPin)
+            .collect(toImmutableSet());
+
+    // TODO: Add support for polylines and polygons similar to mapPins
+
+    ImmutableSet<MapFeature> mapPolygons =
+        stream(features)
+            .filter(Feature::isGeoJson)
+            .map(MapContainerViewModel::toMapGeoJson)
+            .collect(toImmutableSet());
+
+    return ImmutableSet.<MapFeature>builder().addAll(mapPins).addAll(mapPolygons).build();
+  }
+
+  private static MapFeature toMapPin(Feature feature) {
+    return MapPin.newBuilder()
+        .setId(feature.getId())
+        .setPosition(feature.getPoint())
+        .setStyle(feature.getLayer().getDefaultStyle())
+        .setFeature(feature)
+        .build();
+  }
+
+  private static MapGeoJson toMapGeoJson(Feature feature) {
+    JSONObject jsonObject;
+    try {
+      jsonObject = new JSONObject(feature.getGeoJsonString());
+    } catch (JSONException e) {
+      Timber.e(e);
+      jsonObject = new JSONObject();
+    }
+
+    return MapGeoJson.newBuilder()
+        .setId(feature.getId())
+        .setGeoJson(jsonObject)
+        .setStyle(feature.getLayer().getDefaultStyle())
+        .build();
+  }
+
+  public LiveData<Action> getSelectMapTypeClicks() {
+    return selectMapTypeClicks;
+  }
+
+  private Flowable<Event<CameraUpdate>> createCameraUpdateFlowable(
       Flowable<BooleanOrError> locationLockStateFlowable) {
     return cameraUpdateSubject
         .toFlowable(BackpressureStrategy.LATEST)
         .mergeWith(
-            locationLockStateFlowable.switchMap(
-                state -> createLocationLockCameraUpdateFlowable(state)));
+            locationLockStateFlowable.switchMap(this::createLocationLockCameraUpdateFlowable))
+        .map(Event::create);
   }
 
   private Flowable<CameraUpdate> createLocationLockCameraUpdateFlowable(BooleanOrError lockState) {
@@ -133,7 +211,6 @@ public class MapContainerViewModel extends AbstractViewModel {
 
   private Flowable<BooleanOrError> createLocationLockStateFlowable() {
     return locationLockChangeRequests
-        .throttleFirst(200, TimeUnit.MILLISECONDS)
         .switchMapSingle(
             enabled ->
                 enabled
@@ -151,39 +228,27 @@ public class MapContainerViewModel extends AbstractViewModel {
   }
 
   public void onMapTypeButtonClicked() {
-    showMapTypeSelectorRequests.setValue(Event.create(Nil.NIL));
+    selectMapTypeClicks.postValue(Action.create());
   }
 
-  private static ImmutableSet<MapPin> toMapPins(ImmutableSet<Feature> features) {
-    return stream(features).map(MapContainerViewModel::toMapPin).collect(toImmutableSet());
+  public LiveData<Loadable<Project>> getProjectLoadingState() {
+    return projectLoadingState;
   }
 
-  private static MapPin toMapPin(Feature feature) {
-    return MapPin.newBuilder()
-        .setId(feature.getId())
-        .setPosition(feature.getPoint())
-        .setStyle(feature.getLayer().getDefaultStyle())
-        .setFeature(feature)
-        .build();
-  }
-
-  public LiveData<Loadable<Project>> getActiveProject() {
-    return activeProject;
-  }
-
-  public LiveData<ImmutableSet<MapPin>> getMapPins() {
-    return mapPins;
+  public LiveData<ImmutableSet<MapFeature>> getMapFeatures() {
+    return mapFeatures;
   }
 
   public LiveData<ImmutableSet<String>> getMbtilesFilePaths() {
     return mbtilesFilePaths;
   }
 
-  LiveData<CameraUpdate> getCameraUpdateRequests() {
+  LiveData<Event<CameraUpdate>> getCameraUpdateRequests() {
     return cameraUpdateRequests;
   }
 
-  public LiveData<Point> getCameraPosition() {
+  public LiveData<CameraPosition> getCameraPosition() {
+    Timber.d("Current position is %s", cameraPosition.getValue().toString());
     return cameraPosition;
   }
 
@@ -191,11 +256,16 @@ public class MapContainerViewModel extends AbstractViewModel {
     return locationLockState;
   }
 
+  public LiveData<Integer> getIconTint() {
+    return iconTint;
+  }
+
   private boolean isLocationLockEnabled() {
     return locationLockState.getValue().isTrue();
   }
 
-  public void onCameraMove(Point newCameraPosition) {
+  public void onCameraMove(CameraPosition newCameraPosition) {
+    Timber.d("Setting position to %s", newCameraPosition.toString());
     this.cameraPosition.setValue(newCameraPosition);
   }
 
@@ -218,18 +288,57 @@ public class MapContainerViewModel extends AbstractViewModel {
     locationLockChangeRequests.onNext(!isLocationLockEnabled());
   }
 
-  LiveData<Event<Nil>> getShowMapTypeSelectorRequests() {
-    return showMapTypeSelectorRequests;
+  // TODO(#691): Create our own wrapper/interface for MbTiles providers.
+  public void queueTileProvider(MapBoxOfflineTileProvider tileProvider) {
+    this.tileProviders.add(tileProvider);
+  }
+
+  public void closeProviders() {
+    stream(tileProviders).forEach(MapBoxOfflineTileProvider::close);
+  }
+
+  public void setViewMode(Mode viewMode) {
+    mapControlsVisibility.setValue(viewMode == Mode.DEFAULT ? VISIBLE : GONE);
+    moveFeaturesVisibility.setValue(viewMode == Mode.REPOSITION ? VISIBLE : GONE);
+  }
+
+  public LiveData<Integer> getMapControlsVisibility() {
+    return mapControlsVisibility;
+  }
+
+  public LiveData<Integer> getMoveFeatureVisibility() {
+    return moveFeaturesVisibility;
+  }
+
+  public Optional<Feature> getSelectedFeature() {
+    return selectedFeature;
+  }
+
+  public void setSelectedFeature(Optional<Feature> selectedFeature) {
+    this.selectedFeature = selectedFeature;
+  }
+
+  public enum Mode {
+    DEFAULT,
+    REPOSITION
   }
 
   static class CameraUpdate {
 
-    private Point center;
-    private Optional<Float> minZoomLevel;
+    private final Point center;
+    private final Optional<Float> minZoomLevel;
 
     public CameraUpdate(Point center, Optional<Float> minZoomLevel) {
       this.center = center;
       this.minZoomLevel = minZoomLevel;
+    }
+
+    private static CameraUpdate pan(Point center) {
+      return new CameraUpdate(center, Optional.empty());
+    }
+
+    private static CameraUpdate panAndZoom(Point center) {
+      return new CameraUpdate(center, Optional.of(DEFAULT_FEATURE_ZOOM_LEVEL));
     }
 
     public Point getCenter() {
@@ -240,14 +349,7 @@ public class MapContainerViewModel extends AbstractViewModel {
       return minZoomLevel;
     }
 
-    private static CameraUpdate pan(Point center) {
-      return new CameraUpdate(center, Optional.empty());
-    }
-
-    private static CameraUpdate panAndZoom(Point center) {
-      return new CameraUpdate(center, Optional.of(DEFAULT_ZOOM_LEVEL));
-    }
-
+    @NonNull
     @Override
     public String toString() {
       if (minZoomLevel.isPresent()) {
@@ -256,13 +358,5 @@ public class MapContainerViewModel extends AbstractViewModel {
         return "Pan";
       }
     }
-  }
-
-  public void queueTileProvider(MapBoxOfflineTileProvider tileProvider) {
-    this.tileProviders.add(tileProvider);
-  }
-
-  public void closeProviders() {
-    stream(tileProviders).forEach(MapBoxOfflineTileProvider::close);
   }
 }

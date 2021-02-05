@@ -16,15 +16,18 @@
 
 package com.google.android.gnd.ui.home.featuredetails;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import android.app.Application;
 import android.text.format.DateFormat;
 import android.view.View;
 import android.view.View.OnClickListener;
-import androidx.databinding.ObservableField;
+import androidx.annotation.Nullable;
 import androidx.lifecycle.MutableLiveData;
 import com.google.android.gnd.model.AuditInfo;
 import com.google.android.gnd.model.User;
 import com.google.android.gnd.model.observation.Observation;
+import com.google.android.gnd.rx.annotations.Hot;
 import com.google.android.gnd.ui.common.AbstractViewModel;
 import java.util.Date;
 import java8.util.function.Consumer;
@@ -32,24 +35,30 @@ import javax.inject.Inject;
 
 public class ObservationViewModel extends AbstractViewModel implements OnClickListener {
 
-  public final ObservableField<String> userName;
-  public final ObservableField<String> modifiedDate;
-  public final ObservableField<String> modifiedTime;
+  @Hot(replays = true)
+  public final MutableLiveData<String> userName = new MutableLiveData<>();
+
+  @Hot(replays = true)
+  public final MutableLiveData<String> modifiedDate = new MutableLiveData<>();
+
+  @Hot(replays = true)
+  public final MutableLiveData<String> modifiedTime = new MutableLiveData<>();
+
   private final Application application;
-  private Consumer<Observation> observationCallback;
-  private MutableLiveData<Observation> selectedObservation;
+
+  @Nullable private Consumer<Observation> observationCallback;
+
+  @Hot(replays = true)
+  private MutableLiveData<Observation> selectedObservation = new MutableLiveData<>();
 
   @Inject
   ObservationViewModel(Application application) {
     this.application = application;
-    userName = new ObservableField<>();
-    modifiedDate = new ObservableField<>();
-    modifiedTime = new ObservableField<>();
-    selectedObservation = new MutableLiveData<>();
   }
 
   @Override
   public void onClick(View view) {
+    checkNotNull(observationCallback, "observationCallback is null");
     observationCallback.accept(selectedObservation.getValue());
   }
 
@@ -59,9 +68,9 @@ public class ObservationViewModel extends AbstractViewModel implements OnClickLi
     AuditInfo created = observation.getCreated();
     User createdBy = created.getUser();
     Date creationTime = created.getClientTimestamp();
-    userName.set(createdBy.getDisplayName());
-    modifiedDate.set(DateFormat.getMediumDateFormat(application).format(creationTime));
-    modifiedTime.set(DateFormat.getTimeFormat(application).format(creationTime));
+    userName.setValue(createdBy.getDisplayName());
+    modifiedDate.setValue(DateFormat.getMediumDateFormat(application).format(creationTime));
+    modifiedTime.setValue(DateFormat.getTimeFormat(application).format(creationTime));
   }
 
   void setObservationCallback(Consumer<Observation> observationCallback) {

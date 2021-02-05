@@ -16,9 +16,10 @@
 
 package com.google.android.gnd.ui.map.gms;
 
-import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 import com.google.android.gms.maps.GoogleMap;
+import com.google.android.gnd.persistence.local.LocalValueStore;
+import com.google.android.gnd.rx.annotations.Hot;
 import com.google.android.gnd.ui.MarkerIconFactory;
 import com.google.android.gnd.ui.map.MapAdapter;
 import com.google.android.gnd.ui.map.MapProvider;
@@ -30,13 +31,18 @@ import java.util.Map;
 
 /** Ground map adapter implementation for Google Maps API. */
 public class GoogleMapsMapProvider implements MapProvider {
+
   private final MarkerIconFactory markerIconFactory;
+  private final LocalValueStore localValueStore;
+  @Hot private final SingleSubject<MapAdapter> map = SingleSubject.create();
 
-  @Nullable private GoogleMapsFragment fragment;
-  @Nullable private SingleSubject<MapAdapter> map = SingleSubject.create();
+  @SuppressWarnings("NullAway.Init")
+  private GoogleMapsFragment fragment;
 
-  public GoogleMapsMapProvider(MarkerIconFactory markerIconFactory) {
+  public GoogleMapsMapProvider(
+      MarkerIconFactory markerIconFactory, LocalValueStore localValueStore) {
     this.markerIconFactory = markerIconFactory;
+    this.localValueStore = localValueStore;
   }
 
   @Override
@@ -57,7 +63,8 @@ public class GoogleMapsMapProvider implements MapProvider {
         .getMapAsync(
             googleMap ->
                 map.onSuccess(
-                    new GoogleMapsMapAdapter(googleMap, fragment.getContext(), markerIconFactory)));
+                    new GoogleMapsMapAdapter(
+                        googleMap, fragment.getContext(), markerIconFactory, localValueStore)));
   }
 
   @Override
@@ -75,23 +82,17 @@ public class GoogleMapsMapProvider implements MapProvider {
 
   @Override
   public int getMapType() {
-    if (map == null) {
-      throw new IllegalStateException("MapAdapter is null");
-    }
     return map.getValue().getMapType();
   }
 
   @Override
   public void setMapType(int mapType) {
-    if (map == null) {
-      throw new IllegalStateException("MapAdapter is null");
-    }
     map.getValue().setMapType(mapType);
   }
 
   @Override
   public ImmutableMap<Integer, String> getMapTypes() {
-    // TODO: i18n
+    // TODO(#711): Allow user to select language and use here.
     Map<Integer, String> map = new HashMap<>();
     map.put(GoogleMap.MAP_TYPE_NONE, "None");
     map.put(GoogleMap.MAP_TYPE_NORMAL, "Normal");

@@ -18,15 +18,18 @@ package com.google.android.gnd.persistence.local.room;
 
 import static com.google.android.gnd.util.ImmutableListCollector.toImmutableList;
 import static com.google.android.gnd.util.ImmutableSetCollector.toImmutableSet;
+import static com.google.android.gnd.util.StreamUtil.logErrorsAndSkip;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static java8.util.stream.StreamSupport.stream;
 
+import androidx.annotation.Nullable;
 import androidx.room.Transaction;
 import com.google.android.gnd.model.AuditInfo;
 import com.google.android.gnd.model.Mutation;
 import com.google.android.gnd.model.Mutation.Type;
 import com.google.android.gnd.model.Project;
 import com.google.android.gnd.model.User;
-import com.google.android.gnd.model.basemap.OfflineArea;
+import com.google.android.gnd.model.basemap.OfflineBaseMap;
 import com.google.android.gnd.model.basemap.tile.TileSource;
 import com.google.android.gnd.model.feature.Feature;
 import com.google.android.gnd.model.feature.FeatureMutation;
@@ -47,7 +50,7 @@ import com.google.android.gnd.persistence.local.room.dao.LayerDao;
 import com.google.android.gnd.persistence.local.room.dao.MultipleChoiceDao;
 import com.google.android.gnd.persistence.local.room.dao.ObservationDao;
 import com.google.android.gnd.persistence.local.room.dao.ObservationMutationDao;
-import com.google.android.gnd.persistence.local.room.dao.OfflineAreaDao;
+import com.google.android.gnd.persistence.local.room.dao.OfflineBaseMapDao;
 import com.google.android.gnd.persistence.local.room.dao.OfflineBaseMapSourceDao;
 import com.google.android.gnd.persistence.local.room.dao.OptionDao;
 import com.google.android.gnd.persistence.local.room.dao.ProjectDao;
@@ -62,7 +65,7 @@ import com.google.android.gnd.persistence.local.room.entity.LayerEntity;
 import com.google.android.gnd.persistence.local.room.entity.MultipleChoiceEntity;
 import com.google.android.gnd.persistence.local.room.entity.ObservationEntity;
 import com.google.android.gnd.persistence.local.room.entity.ObservationMutationEntity;
-import com.google.android.gnd.persistence.local.room.entity.OfflineAreaEntity;
+import com.google.android.gnd.persistence.local.room.entity.OfflineBaseMapEntity;
 import com.google.android.gnd.persistence.local.room.entity.OfflineBaseMapSourceEntity;
 import com.google.android.gnd.persistence.local.room.entity.OptionEntity;
 import com.google.android.gnd.persistence.local.room.entity.ProjectEntity;
@@ -72,6 +75,7 @@ import com.google.android.gnd.persistence.local.room.models.EntityState;
 import com.google.android.gnd.persistence.local.room.models.TileEntityState;
 import com.google.android.gnd.persistence.local.room.models.UserDetails;
 import com.google.android.gnd.rx.Schedulers;
+import com.google.android.gnd.ui.util.FileUtil;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import io.reactivex.Completable;
@@ -107,9 +111,10 @@ public class RoomLocalDataStore implements LocalDataStore {
   @Inject ObservationMutationDao observationMutationDao;
   @Inject TileSourceDao tileSourceDao;
   @Inject UserDao userDao;
-  @Inject OfflineAreaDao offlineAreaDao;
+  @Inject OfflineBaseMapDao offlineBaseMapDao;
   @Inject OfflineBaseMapSourceDao offlineBaseMapSourceDao;
   @Inject Schedulers schedulers;
+  @Inject FileUtil fileUtil;
 
   @Inject
   RoomLocalDataStore() {}
@@ -140,7 +145,9 @@ public class RoomLocalDataStore implements LocalDataStore {
             Observable.just(field)
                 .filter(__ -> field.getMultipleChoice() != null)
                 .flatMapCompletable(
-                    __ -> insertOrUpdateMultipleChoice(field.getId(), field.getMultipleChoice())))
+                    __ ->
+                        insertOrUpdateMultipleChoice(
+                            field.getId(), checkNotNull(field.getMultipleChoice()))))
         .subscribeOn(schedulers.io());
   }
 
@@ -240,25 +247,27 @@ public class RoomLocalDataStore implements LocalDataStore {
     }
   }
 
-  // TODO(#127): Decouple from Project and pass in project id instead.
   @Override
   public Flowable<ImmutableSet<Feature>> getFeaturesOnceAndStream(Project project) {
     return featureDao
         .findOnceAndStream(project.getId(), EntityState.DEFAULT)
-        .map(
-            list ->
-                stream(list)
-                    .map(f -> FeatureEntity.toFeature(f, project))
-                    .collect(toImmutableSet()))
+        .map(featureEntities -> toFeatures(project, featureEntities))
         .subscribeOn(schedulers.io());
   }
 
-  // TODO(#127): Decouple from Project and remove project from args.
+  private ImmutableSet<Feature> toFeatures(Project project, List<FeatureEntity> featureEntities) {
+    return stream(featureEntities)
+        .flatMap(f -> logErrorsAndSkip(() -> FeatureEntity.toFeature(f, project)))
+        .collect(toImmutableSet());
+  }
+
   @Override
   public Maybe<Feature> getFeature(Project project, String featureId) {
     return featureDao
         .findById(featureId)
         .map(f -> FeatureEntity.toFeature(f, project))
+        .doOnError(e -> Timber.e(e))
+        .onErrorComplete()
         .subscribeOn(schedulers.io());
   }
 
@@ -267,6 +276,8 @@ public class RoomLocalDataStore implements LocalDataStore {
     return observationDao
         .findById(observationId)
         .map(obs -> ObservationEntity.toObservation(feature, obs))
+        .doOnError(e -> Timber.d(e))
+        .onErrorComplete()
         .subscribeOn(schedulers.io());
   }
 
@@ -274,12 +285,15 @@ public class RoomLocalDataStore implements LocalDataStore {
   public Single<ImmutableList<Observation>> getObservations(Feature feature, String formId) {
     return observationDao
         .findByFeatureId(feature.getId(), formId, EntityState.DEFAULT)
-        .map(
-            list ->
-                stream(list)
-                    .map(obs -> ObservationEntity.toObservation(feature, obs))
-                    .collect(toImmutableList()))
+        .map(observationEntities -> toObservations(feature, observationEntities))
         .subscribeOn(schedulers.io());
+  }
+
+  private ImmutableList<Observation> toObservations(
+      Feature feature, List<ObservationEntity> observationEntities) {
+    return stream(observationEntities)
+        .flatMap(obs -> logErrorsAndSkip(() -> ObservationEntity.toObservation(feature, obs)))
+        .collect(toImmutableList());
   }
 
   @Override
@@ -335,11 +349,12 @@ public class RoomLocalDataStore implements LocalDataStore {
   }
 
   @Override
-  public Completable finalizePendingMutations(ImmutableList<Mutation> mutations) {
+  public Completable finalizePendingMutations(@Nullable ImmutableList<Mutation> mutations) {
+    checkNotNull(mutations, "List of mutations can not be null");
     return finalizeDeletions(mutations).andThen(removePending(mutations));
   }
 
-  private Completable finalizeDeletions(ImmutableList<Mutation> mutations) {
+  private Completable finalizeDeletions(@Nullable ImmutableList<Mutation> mutations) {
     return Observable.fromIterable(mutations)
         .filter(mutation -> mutation.getType() == Type.DELETE)
         .flatMapCompletable(
@@ -367,7 +382,7 @@ public class RoomLocalDataStore implements LocalDataStore {
   @Transaction
   @Override
   public Completable mergeFeature(Feature feature) {
-    // TODO(#109): Once we user can edit feature locally, apply pending mutations before saving.
+    // TODO(#706): Apply pending local mutations before saving.
     return featureDao
         .insertOrUpdate(FeatureEntity.fromFeature(feature))
         .subscribeOn(schedulers.io());
@@ -389,6 +404,7 @@ public class RoomLocalDataStore implements LocalDataStore {
       return observationDao.insertOrUpdate(observation);
     }
     ObservationMutationEntity lastMutation = mutations.get(mutations.size() - 1);
+    checkNotNull(lastMutation, "Could not get last mutation");
     return getUser(lastMutation.getUserId())
         .map(user -> applyMutations(observation, mutations, user))
         .flatMapCompletable(obs -> observationDao.insertOrUpdate(obs));
@@ -418,6 +434,7 @@ public class RoomLocalDataStore implements LocalDataStore {
   private Completable apply(FeatureMutation mutation) throws LocalDataStoreException {
     switch (mutation.getType()) {
       case CREATE:
+      case UPDATE:
         return getUser(mutation.getUserId())
             .flatMapCompletable(user -> insertOrUpdateFeature(mutation, user));
       case DELETE:
@@ -545,9 +562,9 @@ public class RoomLocalDataStore implements LocalDataStore {
   }
 
   @Override
-  public Maybe<TileSource> getTileSource(String tileId) {
+  public Maybe<TileSource> getTileSource(String tileUrl) {
     return tileSourceDao
-        .findById(tileId)
+        .findByUrl(tileUrl)
         .map(TileSourceEntity::toTileSource)
         .subscribeOn(schedulers.io());
   }
@@ -561,26 +578,52 @@ public class RoomLocalDataStore implements LocalDataStore {
   }
 
   @Override
-  public Completable insertOrUpdateOfflineArea(OfflineArea area) {
-    return offlineAreaDao
-        .insertOrUpdate(OfflineAreaEntity.fromArea(area))
+  public Completable insertOrUpdateOfflineArea(OfflineBaseMap area) {
+    return offlineBaseMapDao
+        .insertOrUpdate(OfflineBaseMapEntity.fromArea(area))
         .subscribeOn(schedulers.io());
   }
 
   @Override
-  public Flowable<ImmutableList<OfflineArea>> getOfflineAreasOnceAndStream() {
-    return offlineAreaDao
+  public Flowable<ImmutableList<OfflineBaseMap>> getOfflineAreasOnceAndStream() {
+    return offlineBaseMapDao
         .findAllOnceAndStream()
-        .map(areas -> stream(areas).map(OfflineAreaEntity::toArea).collect(toImmutableList()))
+        .map(areas -> stream(areas).map(OfflineBaseMapEntity::toArea).collect(toImmutableList()))
         .subscribeOn(schedulers.io());
   }
 
   @Override
-  public Single<OfflineArea> getOfflineAreaById(String id) {
-    return offlineAreaDao
+  public Single<OfflineBaseMap> getOfflineAreaById(String id) {
+    return offlineBaseMapDao
         .findById(id)
-        .map(OfflineAreaEntity::toArea)
+        .map(OfflineBaseMapEntity::toArea)
         .toSingle()
         .subscribeOn(schedulers.io());
+  }
+
+  @Override
+  public Completable deleteOfflineArea(String id) {
+    return offlineBaseMapDao
+        .findById(id)
+        .toSingle()
+        .doOnSubscribe(__ -> Timber.d("Deleting offline area: %s", id))
+        .flatMapCompletable(offlineBaseMapDao::delete)
+        .subscribeOn(schedulers.io());
+  }
+
+  @Override
+  public Completable updateTileSourceBasemapReferenceCountByUrl(int newCount, String url) {
+    return Completable.fromSingle(tileSourceDao.updateBasemapReferenceCount(newCount, url));
+  }
+
+  @Override
+  public Completable deleteTileByUrl(TileSource tileSource) {
+    if (tileSource.getBasemapReferenceCount() < 1) {
+      return Completable.fromAction(() -> fileUtil.deleteFile(tileSource.getPath()))
+          .andThen(Completable.fromMaybe(tileSourceDao.deleteByUrl(tileSource.getUrl())))
+          .subscribeOn(schedulers.io());
+    } else {
+      return Completable.complete().subscribeOn(schedulers.io());
+    }
   }
 }

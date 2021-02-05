@@ -20,7 +20,6 @@ import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
-import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -29,6 +28,7 @@ import com.google.android.gnd.model.feature.Feature;
 import com.google.android.gnd.model.observation.Observation;
 import com.google.android.gnd.ui.common.AbstractFragment;
 import com.google.android.gnd.ui.common.Navigator;
+import com.google.android.gnd.ui.home.HomeScreenFragmentDirections;
 import dagger.hilt.android.AndroidEntryPoint;
 import java8.util.Optional;
 import javax.inject.Inject;
@@ -56,7 +56,7 @@ public class ObservationListFragment extends AbstractFragment {
   @Nullable
   @Override
   public View onCreateView(
-      @NonNull LayoutInflater inflater, @Nullable ViewGroup container, Bundle savedInstanceState) {
+      LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
     super.onCreateView(inflater, container, savedInstanceState);
     binding = ObservationListFragBinding.inflate(inflater, container, false);
     binding.setViewModel(viewModel);
@@ -65,7 +65,7 @@ public class ObservationListFragment extends AbstractFragment {
   }
 
   @Override
-  public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+  public void onViewCreated(View view, @Nullable Bundle savedInstanceState) {
     super.onViewCreated(view, savedInstanceState);
     RecyclerView observationList = binding.observationListContainer;
     observationList.setLayoutManager(new LinearLayoutManager(getContext()));
@@ -87,7 +87,10 @@ public class ObservationListFragment extends AbstractFragment {
   }
 
   private void onItemClick(Observation observation) {
-    navigator.showObservationDetails(
-        observation.getProject().getId(), observation.getFeature().getId(), observation.getId());
+    navigator.navigate(
+        HomeScreenFragmentDirections.showObservationDetails(
+            observation.getProject().getId(),
+            observation.getFeature().getId(),
+            observation.getId()));
   }
 }

@@ -19,14 +19,11 @@ package com.google.android.gnd.model.layer;
 import com.google.android.gnd.model.form.Form;
 import com.google.auto.value.AutoValue;
 import java8.util.Optional;
-import javax.annotation.Nullable;
 
 @AutoValue
 public abstract class Layer {
-  @Nullable
   public abstract String getId();
 
-  @Nullable
   public abstract String getName();
 
   public abstract Style getDefaultStyle();
@@ -43,9 +40,9 @@ public abstract class Layer {
 
   @AutoValue.Builder
   public abstract static class Builder {
-    public abstract Builder setId(@Nullable String newId);
+    public abstract Builder setId(String newId);
 
-    public abstract Builder setName(@Nullable String newName);
+    public abstract Builder setName(String newName);
 
     public abstract Builder setDefaultStyle(Style newDefaultStyle);
 

@@ -27,20 +27,39 @@ import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.UiSettings;
 import com.google.android.gms.maps.model.BitmapDescriptor;
+import com.google.android.gms.maps.model.JointType;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.LatLngBounds;
 import com.google.android.gms.maps.model.Marker;
 import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.android.gms.maps.model.Polyline;
+import com.google.android.gms.maps.model.PolylineOptions;
+import com.google.android.gms.maps.model.RoundCap;
 import com.google.android.gms.maps.model.TileOverlayOptions;
 import com.google.android.gnd.R;
 import com.google.android.gnd.model.feature.Point;
+import com.google.android.gnd.persistence.local.LocalValueStore;
+import com.google.android.gnd.rx.annotations.Hot;
 import com.google.android.gnd.ui.MarkerIconFactory;
+import com.google.android.gnd.ui.map.CameraPosition;
 import com.google.android.gnd.ui.map.MapAdapter;
+import com.google.android.gnd.ui.map.MapFeature;
+import com.google.android.gnd.ui.map.MapGeoJson;
 import com.google.android.gnd.ui.map.MapPin;
+import com.google.android.gnd.ui.map.MapPolygon;
 import com.google.common.collect.ImmutableSet;
+import com.google.maps.android.collections.MarkerManager;
+import com.google.maps.android.data.Layer;
+import com.google.maps.android.data.geojson.GeoJsonLayer;
+import com.google.maps.android.data.geojson.GeoJsonLineStringStyle;
+import com.google.maps.android.data.geojson.GeoJsonPointStyle;
+import com.google.maps.android.data.geojson.GeoJsonPolygonStyle;
+import io.reactivex.Flowable;
 import io.reactivex.Observable;
-import io.reactivex.subjects.BehaviorSubject;
+import io.reactivex.processors.FlowableProcessor;
+import io.reactivex.processors.PublishProcessor;
 import io.reactivex.subjects.PublishSubject;
+import io.reactivex.subjects.Subject;
 import java.io.File;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -57,27 +76,67 @@ class GoogleMapsMapAdapter implements MapAdapter {
   private final GoogleMap map;
   private final Context context;
   private final MarkerIconFactory markerIconFactory;
-  private final PublishSubject<MapPin> markerClickSubject = PublishSubject.create();
-  private final PublishSubject<Point> dragInteractionSubject = PublishSubject.create();
-  private final BehaviorSubject<Point> cameraMoves = BehaviorSubject.create();
-  // TODO: This is a limitation of the MapBox tile provider we're using;
+
+  /** Marker click events. */
+  @Hot private final Subject<MapPin> markerClicks = PublishSubject.create();
+
+  /** Map drag events. Emits items repeatedly while the map is being dragged. */
+  @Hot private final FlowableProcessor<Point> dragInteractions = PublishProcessor.create();
+
+  /** Camera move events. Emits items repeatedly while camera is in motion. */
+  @Hot private final FlowableProcessor<CameraPosition> cameraMoves = PublishProcessor.create();
+
+  // TODO(#693): Simplify impl of tile providers.
+  // TODO(#691): This is a limitation of the MapBox tile provider we're using;
   // since one need to call `close` explicitly, we cannot generically expose these as TileProviders;
   // instead we must retain explicit reference to the concrete type.
+  @Hot
   private final PublishSubject<MapBoxOfflineTileProvider> tileProviders = PublishSubject.create();
+
+  /**
+   * Manager for handling click events for markers.
+   *
+   * <p>This isn't needed if the map only has a single layer. But in our case, multiple GeoJSON
+   * layers might be added and we wish to have independent clickable features for each layer.
+   */
+  private final MarkerManager markerManager;
+  // TODO: Add managers for polyline and polygon layers
 
   /**
    * References to Google Maps SDK Markers present on the map. Used to sync and update markers with
    * current view and data state.
    */
-  private Set<Marker> markers = new HashSet<>();
+  private final MarkerManager.Collection markers;
+
+  /**
+   * References to Google Maps SDK Markers present on the map. Used to sync and update polylines
+   * with current view and data state.
+   */
+  private Set<Polyline> polylines = new HashSet<>();
+
+  /**
+   * References to Google Maps SDK GeoJSON present on the map. Used to sync and update GeoJSON with
+   * current view and data state.
+   */
+  private Set<GeoJsonLayer> geoJsonLayers = new HashSet<>();
 
   @Nullable private LatLng cameraTargetBeforeDrag;
 
-  public GoogleMapsMapAdapter(GoogleMap map, Context context, MarkerIconFactory markerIconFactory) {
+  public GoogleMapsMapAdapter(
+      GoogleMap map,
+      Context context,
+      MarkerIconFactory markerIconFactory,
+      LocalValueStore localValueStore) {
     this.map = map;
     this.context = context;
     this.markerIconFactory = markerIconFactory;
-    map.setMapType(GoogleMap.MAP_TYPE_HYBRID);
+
+    // init markers
+    markerManager = new MarkerManager(map);
+    markers = markerManager.newCollection();
+    markers.setOnMarkerClickListener(this::onMarkerClick);
+
+    map.setMapType(localValueStore.getSavedMapType(GoogleMap.MAP_TYPE_HYBRID));
     UiSettings uiSettings = map.getUiSettings();
     uiSettings.setRotateGesturesEnabled(false);
     uiSettings.setTiltGesturesEnabled(false);
@@ -85,7 +144,6 @@ class GoogleMapsMapAdapter implements MapAdapter {
     uiSettings.setMapToolbarEnabled(false);
     uiSettings.setCompassEnabled(false);
     uiSettings.setIndoorLevelPickerEnabled(false);
-    map.setOnMarkerClickListener(this::onMarkerClick);
     map.setOnCameraIdleListener(this::onCameraIdle);
     map.setOnCameraMoveStartedListener(this::onCameraMoveStarted);
     map.setOnCameraMoveListener(this::onCameraMove);
@@ -102,7 +160,7 @@ class GoogleMapsMapAdapter implements MapAdapter {
 
   private boolean onMarkerClick(Marker marker) {
     if (map.getUiSettings().isZoomGesturesEnabled()) {
-      markerClickSubject.onNext((MapPin) marker.getTag());
+      markerClicks.onNext((MapPin) marker.getTag());
       // Allow map to pan to marker.
       return false;
     } else {
@@ -111,21 +169,25 @@ class GoogleMapsMapAdapter implements MapAdapter {
     }
   }
 
+  @Hot
   @Override
   public Observable<MapPin> getMapPinClicks() {
-    return markerClickSubject;
+    return markerClicks;
   }
 
+  @Hot
   @Override
-  public Observable<Point> getDragInteractions() {
-    return dragInteractionSubject;
+  public Flowable<Point> getDragInteractions() {
+    return dragInteractions;
   }
 
+  @Hot
   @Override
-  public Observable<Point> getCameraMoves() {
+  public Flowable<CameraPosition> getCameraMoves() {
     return cameraMoves;
   }
 
+  @Hot
   @Override
   public Observable<MapBoxOfflineTileProvider> getTileProviders() {
     return tileProviders;
@@ -142,6 +204,12 @@ class GoogleMapsMapAdapter implements MapAdapter {
   }
 
   @Override
+  public void moveCamera(CameraPosition position) {
+    map.moveCamera(
+        CameraUpdateFactory.newLatLngZoom(toLatLng(position.getTarget()), position.getZoomLevel()));
+  }
+
+  @Override
   public void moveCamera(Point point) {
     map.moveCamera(CameraUpdateFactory.newLatLng(toLatLng(point)));
   }
@@ -155,14 +223,76 @@ class GoogleMapsMapAdapter implements MapAdapter {
     LatLng position = toLatLng(mapPin.getPosition());
     String color = mapPin.getStyle().getColor();
     BitmapDescriptor icon = markerIconFactory.getMarkerIcon(parseColor(color));
-    Marker marker = map.addMarker(new MarkerOptions().position(position).icon(icon).alpha(1.0f));
+    Marker marker =
+        markers.addMarker(new MarkerOptions().position(position).icon(icon).alpha(1.0f));
     marker.setTag(mapPin);
-    markers.add(marker);
+  }
+
+  private void addMapPolyline(MapPolygon mapPolygon) {
+    for (ImmutableSet<Point> vertices : mapPolygon.getVertices()) {
+      PolylineOptions options = new PolylineOptions();
+
+      // Read-only
+      options.clickable(false);
+
+      // Add vertices to PolylineOptions
+      stream(vertices).map(GoogleMapsMapAdapter::toLatLng).forEach(options::add);
+
+      // Add to map
+      Polyline polyline = map.addPolyline(options);
+      polyline.setTag(mapPolygon);
+
+      // Style polyline
+      polyline.setStartCap(new RoundCap());
+      polyline.setEndCap(new RoundCap());
+      polyline.setWidth(getPolylineStrokeWidth());
+      polyline.setColor(parseColor(mapPolygon.getStyle().getColor()));
+      polyline.setJointType(JointType.ROUND);
+
+      polylines.add(polyline);
+    }
+  }
+
+  private int getPolylineStrokeWidth() {
+    return (int) context.getResources().getDimension(R.dimen.polyline_stroke_width);
+  }
+
+  private void addMapGeoJson(MapGeoJson mapFeature) {
+    // Pass markerManager here otherwise markers in the previous layers won't be clickable.
+    GeoJsonLayer layer =
+        new GeoJsonLayer(map, mapFeature.getGeoJson(), markerManager, null, null, null);
+
+    int width = getPolylineStrokeWidth();
+    int color = parseColor(mapFeature.getStyle().getColor());
+
+    GeoJsonPointStyle pointStyle = layer.getDefaultPointStyle();
+    pointStyle.setLineStringWidth(width);
+    pointStyle.setPolygonFillColor(color);
+
+    GeoJsonPolygonStyle polygonStyle = layer.getDefaultPolygonStyle();
+    polygonStyle.setLineStringWidth(width);
+    polygonStyle.setPolygonFillColor(color);
+
+    GeoJsonLineStringStyle lineStringStyle = layer.getDefaultLineStringStyle();
+    lineStringStyle.setLineStringWidth(width);
+    lineStringStyle.setPolygonFillColor(color);
+
+    layer.addLayerToMap();
+    geoJsonLayers.add(layer);
   }
 
   private void removeAllMarkers() {
-    stream(markers).forEach(Marker::remove);
     markers.clear();
+  }
+
+  private void removeAllPolylines() {
+    stream(polylines).forEach(Polyline::remove);
+    polylines.clear();
+  }
+
+  private void removeAllGeoJsonLayers() {
+    stream(geoJsonLayers).forEach(Layer::removeLayerFromMap);
+    geoJsonLayers.clear();
   }
 
   @Override
@@ -184,26 +314,51 @@ class GoogleMapsMapAdapter implements MapAdapter {
   }
 
   @Override
-  public void setMapPins(ImmutableSet<MapPin> updatedPins) {
-    if (updatedPins.isEmpty()) {
+  public void setMapFeatures(ImmutableSet<MapFeature> updatedFeatures) {
+    if (updatedFeatures.isEmpty()) {
       removeAllMarkers();
+      removeAllPolylines();
+      removeAllGeoJsonLayers();
       return;
     }
-    Set<MapPin> pinsToAdd = new HashSet<>(updatedPins);
-    Iterator<Marker> it = markers.iterator();
-    while (it.hasNext()) {
-      Marker marker = it.next();
+    Set<MapFeature> featuresToAdd = new HashSet<>(updatedFeatures);
+
+    for (Marker marker : markers.getMarkers()) {
       MapPin pin = (MapPin) marker.getTag();
-      if (updatedPins.contains(pin)) {
+      if (updatedFeatures.contains(pin)) {
         // If pin already exists on map, don't add it.
-        pinsToAdd.remove(pin);
+        featuresToAdd.remove(pin);
       } else {
-        // Remove existing pins not in list of updatedPins.
+        // Remove existing pins not in list of updatedFeatures.
         removeMarker(marker);
-        it.remove();
       }
     }
-    stream(pinsToAdd).forEach(this::addMapPin);
+
+    Iterator<Polyline> polylineIterator = polylines.iterator();
+    while (polylineIterator.hasNext()) {
+      Polyline polyline = polylineIterator.next();
+      MapPolygon polygon = (MapPolygon) polyline.getTag();
+      if (updatedFeatures.contains(polygon)) {
+        // If polygon already exists on map, don't add it.
+        featuresToAdd.remove(polygon);
+      } else {
+        // Remove existing polyline not in list of updatedFeatures.
+        removePolygon(polyline);
+        polylineIterator.remove();
+      }
+    }
+
+    stream(featuresToAdd)
+        .forEach(
+            mapFeature -> {
+              if (mapFeature instanceof MapPin) {
+                addMapPin((MapPin) mapFeature);
+              } else if (mapFeature instanceof MapPolygon) {
+                addMapPolyline((MapPolygon) mapFeature);
+              } else if (mapFeature instanceof MapGeoJson) {
+                addMapGeoJson((MapGeoJson) mapFeature);
+              }
+            });
   }
 
   @Override
@@ -219,6 +374,11 @@ class GoogleMapsMapAdapter implements MapAdapter {
   private void removeMarker(Marker marker) {
     Timber.v("Removing marker %s", marker.getId());
     marker.remove();
+  }
+
+  private void removePolygon(Polyline polyline) {
+    Timber.v("Removing polyline %s", polyline.getId());
+    polyline.remove();
   }
 
   private int parseColor(@Nullable String colorHexCode) {
@@ -243,17 +403,24 @@ class GoogleMapsMapAdapter implements MapAdapter {
   }
 
   private void onCameraMove() {
-    LatLng cameraTarget = map.getCameraPosition().target;
-    Point target = fromLatLng(cameraTarget);
-    cameraMoves.onNext(target);
-    if (cameraTargetBeforeDrag != null && !cameraTarget.equals(cameraTargetBeforeDrag)) {
-      dragInteractionSubject.onNext(target);
+    com.google.android.gms.maps.model.CameraPosition gmsCameraPosition = map.getCameraPosition();
+    Point target = fromLatLng(gmsCameraPosition.target);
+    CameraPosition position = new CameraPosition(target, gmsCameraPosition.zoom);
+    cameraMoves.onNext(position);
+    if (cameraTargetBeforeDrag != null
+        && !gmsCameraPosition.target.equals(cameraTargetBeforeDrag)) {
+      dragInteractions.onNext(target);
     }
   }
 
   @Override
   public LatLngBounds getViewport() {
     return map.getProjection().getVisibleRegion().latLngBounds;
+  }
+
+  @Override
+  public void setBounds(LatLngBounds bounds) {
+    map.moveCamera(CameraUpdateFactory.newLatLngBounds(bounds, 0));
   }
 
   private void addTileOverlay(String filePath) {

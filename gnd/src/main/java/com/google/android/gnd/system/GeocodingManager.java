@@ -16,25 +16,30 @@
 
 package com.google.android.gnd.system;
 
-import android.content.Context;
+import static java8.util.stream.StreamSupport.stream;
+
+import android.content.res.Resources;
 import android.location.Address;
 import android.location.Geocoder;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.gms.maps.model.LatLngBounds;
 import com.google.android.gnd.R;
 import com.google.android.gnd.rx.Schedulers;
-import dagger.hilt.android.qualifiers.ApplicationContext;
+import com.google.android.gnd.rx.annotations.Cold;
 import io.reactivex.Single;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.List;
 import java8.util.Optional;
+import java8.util.stream.Collectors;
 import javax.inject.Inject;
+import javax.inject.Singleton;
 import timber.log.Timber;
 
-/**
- * GeocodingManger abstracts native geocoding facilities, and provides convenience methods for using
- * geocoding functionality on Ground model objects.
- */
+/** Abstracts native geocoding facilities. */
+@Singleton
 public class GeocodingManager {
   static class AddressNotFoundException extends Exception {
     public AddressNotFoundException(String message) {
@@ -47,43 +52,46 @@ public class GeocodingManager {
   private final String defaultAreaName;
 
   @Inject
-  public GeocodingManager(@ApplicationContext Context context, Schedulers schedulers) {
-    this.geocoder = new Geocoder(context);
+  public GeocodingManager(Geocoder geocoder, Schedulers schedulers, Resources resources) {
+    this.geocoder = geocoder;
     this.schedulers = schedulers;
-    this.defaultAreaName = context.getString(R.string.offline_areas_unknown_area);
+    this.defaultAreaName = resources.getString(R.string.unnamed_area);
   }
 
-  private String getOfflineAreaNameInternal(LatLngBounds bounds)
+  /**
+   * Retrieve a human readable name for the region bounded by the provided {@param bounds}.
+   *
+   * <p>If no area name is found for the given area, returns a default value.
+   */
+  @Cold
+  public Single<String> getAreaName(LatLngBounds bounds) {
+    return Single.fromCallable(() -> getAreaNameInternal(bounds))
+        .doOnError(throwable -> Timber.e(throwable, "Couldn't get address for bounds: %s", bounds))
+        .subscribeOn(schedulers.io());
+  }
+
+  private String getAreaNameInternal(LatLngBounds bounds)
       throws AddressNotFoundException, IOException {
     LatLng center = bounds.getCenter();
 
     List<Address> addresses = geocoder.getFromLocation(center.latitude, center.longitude, 1);
-
     if (addresses.isEmpty()) {
       throw new AddressNotFoundException("No address found for area.");
     }
 
     Address address = addresses.get(0);
 
-    // TODO: Decide exactly what set of address parts we want to show the user.
-    Optional<String> country = Optional.ofNullable(address.getCountryName());
-    Optional<String> locality = Optional.ofNullable(address.getLocality());
+    // TODO(#613): Decide exactly what set of address parts we want to show the user.
+    String country = Optional.ofNullable(address.getCountryName()).orElse("");
+    String locality = Optional.ofNullable(address.getLocality()).orElse("");
+    String admin = Optional.ofNullable(address.getAdminArea()).orElse("");
+    String subAdmin = Optional.ofNullable(address.getSubAdminArea()).orElse("");
+    Collection<String> components =
+        new ArrayList<>(Arrays.asList(country, locality, admin, subAdmin));
 
-    return country
-        .map(
-            countryName -> locality.isPresent() ? countryName + ", " + locality.get() : countryName)
-        .orElse(defaultAreaName);
-  }
+    String fullLocationName =
+        stream(components).filter(x -> !x.isEmpty()).collect(Collectors.joining(", "));
 
-  /**
-   * Performs reverse geocoding on {@param bounds} to retrieve a human readable name for the region
-   * captured in the bounds.
-   *
-   * <p>If no address is found for the given area, returns a default value.
-   */
-  public Single<String> getOfflineAreaName(LatLngBounds bounds) {
-    return Single.fromCallable(() -> getOfflineAreaNameInternal(bounds))
-        .doOnError(throwable -> Timber.e(throwable, "Couldn't get address for bounds: %s", bounds))
-        .subscribeOn(schedulers.io());
+    return fullLocationName.isEmpty() ? defaultAreaName : fullLocationName;
   }
 }

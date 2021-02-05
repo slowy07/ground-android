@@ -16,14 +16,18 @@
 
 package com.google.android.gnd.ui.home.featuredetails;
 
-import androidx.databinding.ObservableBoolean;
-import androidx.databinding.ObservableField;
+import android.graphics.Bitmap;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.LiveDataReactiveStreams;
+import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.ViewModel;
+import com.google.android.gnd.R;
 import com.google.android.gnd.model.feature.Feature;
+import com.google.android.gnd.rx.annotations.Hot;
+import com.google.android.gnd.ui.MarkerIconFactory;
 import com.google.android.gnd.ui.common.SharedViewModel;
 import com.google.android.gnd.ui.home.BottomSheetState;
+import com.google.android.gnd.ui.util.DrawableUtil;
 import io.reactivex.processors.BehaviorProcessor;
 import java8.util.Optional;
 import javax.inject.Inject;
@@ -31,17 +35,19 @@ import javax.inject.Inject;
 @SharedViewModel
 public class FeatureDetailsViewModel extends ViewModel {
 
-  public final ObservableField<String> featureTitle;
-  public final ObservableField<String> featureSubtitle;
-  public final ObservableBoolean isFeatureSubtitleVisible = new ObservableBoolean(false);
+  @Hot(replays = true)
+  public final MutableLiveData<Optional<Feature>> feature = new MutableLiveData<>();
 
-  private final BehaviorProcessor<Optional<Feature>> selectedFeature;
+  @Hot(replays = true)
+  private final BehaviorProcessor<Optional<Feature>> selectedFeature =
+      BehaviorProcessor.createDefault(Optional.empty());
+
+  private final Bitmap markerBitmap;
 
   @Inject
-  public FeatureDetailsViewModel() {
-    featureTitle = new ObservableField<>("My Title");
-    featureSubtitle = new ObservableField<>();
-    selectedFeature = BehaviorProcessor.createDefault(Optional.empty());
+  public FeatureDetailsViewModel(MarkerIconFactory markerIconFactory, DrawableUtil drawableUtil) {
+    this.markerBitmap =
+        markerIconFactory.getMarkerBitmap(drawableUtil.getColor(R.color.colorGrey600));
   }
 
   /**
@@ -58,10 +64,12 @@ public class FeatureDetailsViewModel extends ViewModel {
       return;
     }
 
-    featureTitle.set(state.getFeature().getTitle());
-    featureSubtitle.set(state.getFeature().getSubtitle());
-    isFeatureSubtitleVisible.set(!state.getFeature().getSubtitle().isEmpty());
+    Optional<Feature> featureOptional = state.getFeature();
+    feature.setValue(featureOptional);
+    selectedFeature.onNext(featureOptional);
+  }
 
-    selectedFeature.onNext(Optional.of(state.getFeature()));
+  public Bitmap getMarkerBitmap() {
+    return markerBitmap;
   }
 }

@@ -60,7 +60,6 @@ public abstract class Mutation<B extends Mutation.Builder> {
   public abstract String getLayerId();
 
   /** Returns the id of the user requesting the change. */
-  @Nullable
   public abstract String getUserId();
 
   /** Returns the time the mutation was requested on the client. */
@@ -91,13 +90,13 @@ public abstract class Mutation<B extends Mutation.Builder> {
 
     public abstract T setProjectId(String newProjectId);
 
-    public abstract T setUserId(@Nullable String newUserId);
+    public abstract T setUserId(String newUserId);
 
     public abstract T setClientTimestamp(@NonNull Date newClientTimestamp);
 
     public abstract T setRetryCount(long newRetryCount);
 
-    public abstract T setLastError(String lastError);
+    public abstract T setLastError(@Nullable String lastError);
 
     public abstract Mutation build();
   }

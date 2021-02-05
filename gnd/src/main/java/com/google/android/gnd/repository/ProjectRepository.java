@@ -16,24 +16,26 @@
 
 package com.google.android.gnd.repository;
 
-import android.util.Log;
-import androidx.annotation.NonNull;
 import com.google.android.gnd.model.Project;
 import com.google.android.gnd.model.User;
 import com.google.android.gnd.persistence.local.LocalDataStore;
 import com.google.android.gnd.persistence.local.LocalValueStore;
 import com.google.android.gnd.persistence.remote.RemoteDataStore;
 import com.google.android.gnd.rx.Loadable;
+import com.google.android.gnd.rx.annotations.Cold;
+import com.google.android.gnd.rx.annotations.Hot;
 import com.google.common.collect.ImmutableList;
 import io.reactivex.Flowable;
 import io.reactivex.Single;
 import io.reactivex.processors.BehaviorProcessor;
 import io.reactivex.processors.FlowableProcessor;
+import io.reactivex.processors.PublishProcessor;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java8.util.Optional;
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import timber.log.Timber;
 
 /**
  * Coordinates persistence and retrieval of {@link Project} instances from remote, local, and in
@@ -42,16 +44,23 @@ import javax.inject.Singleton;
  */
 @Singleton
 public class ProjectRepository {
-  private static final String TAG = ProjectRepository.class.getSimpleName();
+
   private static final long LOAD_REMOTE_PROJECT_TIMEOUT_SECS = 5;
-  private static final long LOAD_REMOTE_PROJECT_SUMMARIES_TIMEOUT_SECS = 10;
+  private static final long LOAD_REMOTE_PROJECT_SUMMARIES_TIMEOUT_SECS = 30;
 
   private final InMemoryCache cache;
   private final LocalDataStore localDataStore;
   private final RemoteDataStore remoteDataStore;
-  private final Flowable<Loadable<Project>> activeProjectStream;
-  private final FlowableProcessor<Optional<String>> activateProjectRequests;
   private final LocalValueStore localValueStore;
+
+  /** Emits a project id on {@see #activateProject} and empty on {@see #clearActiveProject}. */
+  @Hot
+  private final FlowableProcessor<Optional<String>> selectProjectEvent = PublishProcessor.create();
+
+  /** Emits the latest loading state of the current project on subscribe and on change. */
+  @Hot(replays = true)
+  private final FlowableProcessor<Loadable<Project>> projectLoadingState =
+      BehaviorProcessor.create();
 
   @Inject
   public ProjectRepository(
@@ -64,48 +73,41 @@ public class ProjectRepository {
     this.cache = cache;
     this.localValueStore = localValueStore;
 
-    // BehaviorProcessor re-emits last requested project id to late subscribers.
-    this.activateProjectRequests = BehaviorProcessor.create();
-
-    // Stream that emits a value whenever the user changes projects.
-    Flowable<Optional<String>> distinctActivateProjectRequests =
-        activateProjectRequests
-            .distinctUntilChanged()
-            .doOnNext(id -> Log.v(TAG, "Requested project id changed: " + id));
-
-    // Stream that emits project loading state when requested id changes. Late subscribers receive
-    // the last project or loading state.
-    Flowable<Loadable<Project>> activeProject =
-        distinctActivateProjectRequests.switchMap(this::loadProject).onBackpressureLatest();
-
-    // Convert project loading state stream to Connectable to prevent loadProject() from being
-    // called once for each subscription. Instead, it will be called once on each project change,
-    // with each subscriber receiving a cached copy of the result. This is required in addition
-    // to onBackpressureLatest() above.
-    this.activeProjectStream = activeProject.replay(1).refCount();
+    // Kicks off the loading process whenever a new project id is selected.
+    selectProjectEvent
+        .distinctUntilChanged()
+        .switchMap(this::activateProject)
+        .onBackpressureLatest()
+        .subscribe(projectLoadingState);
   }
 
-  private Flowable<Loadable<Project>> loadProject(Optional<String> projectId) {
+  @Cold
+  private Flowable<Loadable<Project>> activateProject(Optional<String> projectId) {
     // Empty id indicates intent to deactivate the current project. Used on sign out.
     if (projectId.isEmpty()) {
       return Flowable.just(Loadable.notLoaded());
     }
     String id = projectId.get();
-
-    return syncProjectWithRemote(id)
-        .doOnSubscribe(__ -> Log.d(TAG, "Activating project " + id))
-        .doOnError(err -> Log.d(TAG, "Error loading project from remote", err))
-        .onErrorResumeNext(
-            __ ->
-                localDataStore
-                    .getProjectById(id)
-                    .toSingle()
-                    .doOnError(err -> Log.d(TAG, "Error loading project from local db", err)))
+    return getProject(id)
         .doOnSuccess(__ -> localValueStore.setLastActiveProjectId(id))
         .toFlowable()
         .compose(Loadable::loadingOnceAndWrap);
   }
 
+  @Cold
+  private Single<Project> getProject(String id) {
+    return syncProjectWithRemote(id)
+        .doOnSubscribe(__ -> Timber.d("Loading project %s", id))
+        .doOnError(err -> Timber.d(err, "Error loading project from remote"))
+        .onErrorResumeNext(
+            __ ->
+                localDataStore
+                    .getProjectById(id)
+                    .toSingle()
+                    .doOnError(err -> Timber.e(err, "Error loading project from local db")));
+  }
+
+  @Cold
   private Single<Project> syncProjectWithRemote(String id) {
     return remoteDataStore
         .loadProject(id)
@@ -113,37 +115,45 @@ public class ProjectRepository {
         .flatMap(p -> localDataStore.insertOrUpdateProject(p).toSingleDefault(p));
   }
 
-  @NonNull
   public Optional<String> getLastActiveProjectId() {
     return Optional.ofNullable(localValueStore.getLastActiveProjectId());
   }
 
   /**
-   * Returns a stream that emits the latest project activation state, and continues to emits changes
-   * to that state until all subscriptions are disposed.
+   * Returns an observable that emits the latest project activation state, and continues to emit
+   * changes to that state until all subscriptions are disposed.
    */
-  public Flowable<Loadable<Project>> getActiveProjectOnceAndStream() {
-    return activeProjectStream;
+  @Hot(replays = true)
+  public Flowable<Loadable<Project>> getProjectLoadingState() {
+    return projectLoadingState;
+  }
+
+  @Hot(replays = true)
+  public Flowable<Optional<Project>> getActiveProject() {
+    return projectLoadingState.map(Loadable::value);
   }
 
   public void activateProject(String projectId) {
-    Log.v(TAG, "activateProject() called with " + projectId);
-    activateProjectRequests.onNext(Optional.of(projectId));
+    Timber.v("activateProject() called with %s", projectId);
+    selectProjectEvent.onNext(Optional.of(projectId));
   }
 
+  @Cold
   public Flowable<Loadable<List<Project>>> getProjectSummaries(User user) {
     return loadProjectSummariesFromRemote(user)
-        .doOnSubscribe(__ -> Log.d(TAG, "Loading project list from remote"))
-        .doOnError(err -> Log.d(TAG, "Failed to load project list from remote", err))
+        .doOnSubscribe(__ -> Timber.d("Loading project list from remote"))
+        .doOnError(err -> Timber.e(err, "Failed to load project list from remote"))
         .onErrorResumeNext(__ -> localDataStore.getProjects())
         .toFlowable()
         .compose(Loadable::loadingOnceAndWrap);
   }
 
+  @Cold
   public Single<ImmutableList<Project>> getOfflineProjects() {
     return localDataStore.getProjects();
   }
 
+  @Cold
   private Single<List<Project>> loadProjectSummariesFromRemote(User user) {
     return remoteDataStore
         .loadProjectSummaries(user)
@@ -154,6 +164,6 @@ public class ProjectRepository {
   public void clearActiveProject() {
     cache.clear();
     localValueStore.clearLastActiveProjectId();
-    activateProjectRequests.onNext(Optional.empty());
+    selectProjectEvent.onNext(Optional.empty());
   }
 }

@@ -18,8 +18,8 @@ package com.google.android.gnd.ui.editobservation;
 
 import static com.google.android.gnd.ui.editobservation.AddPhotoDialogAdapter.PhotoStorageResource.PHOTO_SOURCE_CAMERA;
 import static com.google.android.gnd.ui.editobservation.AddPhotoDialogAdapter.PhotoStorageResource.PHOTO_SOURCE_STORAGE;
+import static java.util.Objects.requireNonNull;
 
-import android.app.AlertDialog;
 import android.content.Context;
 import android.os.Bundle;
 import android.view.LayoutInflater;
@@ -27,8 +27,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.LinearLayout;
-import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
 import androidx.databinding.ViewDataBinding;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -43,7 +43,8 @@ import com.google.android.gnd.model.form.Element;
 import com.google.android.gnd.model.form.Element.Type;
 import com.google.android.gnd.model.form.Field;
 import com.google.android.gnd.model.form.Form;
-import com.google.android.gnd.model.form.MultipleChoice.Cardinality;
+import com.google.android.gnd.model.form.MultipleChoice;
+import com.google.android.gnd.model.observation.MultipleChoiceResponse;
 import com.google.android.gnd.model.observation.Response;
 import com.google.android.gnd.model.observation.TextResponse;
 import com.google.android.gnd.ui.common.AbstractFragment;
@@ -69,16 +70,13 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
 
   @Inject Navigator navigator;
   @Inject FieldViewFactory fieldViewFactory;
+  @Inject EphemeralPopups popups;
 
   private EditObservationViewModel viewModel;
-  private SingleSelectDialogFactory singleSelectDialogFactory;
-  private MultiSelectDialogFactory multiSelectDialogFactory;
   private EditObservationFragBinding binding;
 
   private static AbstractFieldViewModel getViewModel(ViewDataBinding binding) {
-    if (binding == null) {
-      return null;
-    } else if (binding instanceof TextInputFieldBinding) {
+    if (binding instanceof TextInputFieldBinding) {
       return ((TextInputFieldBinding) binding).getViewModel();
     } else if (binding instanceof MultipleChoiceInputFieldBinding) {
       return ((MultipleChoiceInputFieldBinding) binding).getViewModel();
@@ -92,14 +90,12 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
   @Override
   public void onCreate(@Nullable Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
-    singleSelectDialogFactory = new SingleSelectDialogFactory(getContext());
-    multiSelectDialogFactory = new MultiSelectDialogFactory(getContext());
     viewModel = getViewModel(EditObservationViewModel.class);
   }
 
   @Override
   public View onCreateView(
-      @NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
+      LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
     binding = EditObservationFragBinding.inflate(inflater, container, false);
     binding.setLifecycleOwner(this);
     binding.setViewModel(viewModel);
@@ -109,7 +105,7 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
   }
 
   @Override
-  public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+  public void onViewCreated(View view, @Nullable Bundle savedInstanceState) {
     super.onViewCreated(view, savedInstanceState);
     TwoLineToolbar toolbar = binding.editObservationToolbar;
     ((MainActivity) getActivity()).setActionBar(toolbar, R.drawable.ic_close_black_24dp);
@@ -129,11 +125,11 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
         showValidationErrorsAlert();
         break;
       case NO_CHANGES_TO_SAVE:
-        EphemeralPopups.showFyi(getContext(), R.string.no_changes_to_save);
+        popups.showFyi(R.string.no_changes_to_save);
         navigator.navigateUp();
         break;
       case SAVED:
-        EphemeralPopups.showSuccess(getContext(), R.string.saved);
+        popups.showSuccess(R.string.saved);
         navigator.navigateUp();
         break;
       default:
@@ -146,10 +142,9 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
     fieldViewModel.init(field, viewModel.getSavedOrOriginalResponse(field.getId()));
 
     if (fieldViewModel instanceof PhotoFieldViewModel) {
-      observeSelectPhotoClicks((PhotoFieldViewModel) fieldViewModel);
-      observePhotoAdded((PhotoFieldViewModel) fieldViewModel);
+      initPhotoField((PhotoFieldViewModel) fieldViewModel);
     } else if (fieldViewModel instanceof MultipleChoiceFieldViewModel) {
-      observeMultipleChoiceClicks((MultipleChoiceFieldViewModel) fieldViewModel);
+      observeSelectChoiceClicks((MultipleChoiceFieldViewModel) fieldViewModel);
     }
 
     fieldViewModel
@@ -197,32 +192,53 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
     }
   }
 
-  private void observeMultipleChoiceClicks(MultipleChoiceFieldViewModel viewModel) {
+  private void observeSelectChoiceClicks(MultipleChoiceFieldViewModel viewModel) {
     viewModel
         .getShowDialogClicks()
         .observe(
             this,
             __ ->
-                onShowDialog(
-                    viewModel.getField(),
-                    viewModel.getResponse().getValue(),
-                    viewModel::setResponse));
+                createDialog(
+                        viewModel.getField(),
+                        viewModel.getCurrentResponse(),
+                        viewModel::setResponse)
+                    .show());
   }
 
-  private void onShowDialog(
-      Field field, Optional<Response> currentResponse, Consumer<Optional<Response>> consumer) {
-    Cardinality cardinality = field.getMultipleChoice().getCardinality();
-    switch (cardinality) {
+  private AlertDialog createDialog(
+      Field field,
+      Optional<MultipleChoiceResponse> response,
+      Consumer<Optional<Response>> consumer) {
+    MultipleChoice multipleChoice = requireNonNull(field.getMultipleChoice());
+    switch (multipleChoice.getCardinality()) {
       case SELECT_MULTIPLE:
-        multiSelectDialogFactory.create(field, currentResponse, consumer).show();
-        break;
+        return MultiSelectDialogFactory.builder()
+            .setContext(requireContext())
+            .setTitle(field.getLabel())
+            .setMultipleChoice(multipleChoice)
+            .setCurrentValue(response)
+            .setValueConsumer(consumer)
+            .build()
+            .createDialog();
       case SELECT_ONE:
-        singleSelectDialogFactory.create(field, currentResponse, consumer).show();
-        break;
+        return SingleSelectDialogFactory.builder()
+            .setContext(requireContext())
+            .setTitle(field.getLabel())
+            .setMultipleChoice(multipleChoice)
+            .setCurrentValue(response)
+            .setValueConsumer(consumer)
+            .build()
+            .createDialog();
       default:
-        Timber.e("Unknown cardinality: %s", cardinality);
-        break;
+        throw new IllegalArgumentException(
+            "Unknown cardinality: " + multipleChoice.getCardinality());
     }
+  }
+
+  private void initPhotoField(PhotoFieldViewModel photoFieldViewModel) {
+    photoFieldViewModel.setClearButtonVisible(true);
+    observeSelectPhotoClicks(photoFieldViewModel);
+    observePhotoAdded(photoFieldViewModel);
   }
 
   private void observeSelectPhotoClicks(PhotoFieldViewModel fieldViewModel) {
@@ -237,6 +253,7 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
         .observe(
             this,
             map -> {
+              // TODO: Do not set response if already handled.
               Field field = fieldViewModel.getField();
               if (map.containsKey(field)) {
                 fieldViewModel.setResponse(TextResponse.fromString(map.get(field)));
@@ -250,30 +267,33 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
     addPhotoBottomSheetBinding.setViewModel(viewModel);
     addPhotoBottomSheetBinding.setField(field);
 
-    BottomSheetDialog bottomSheetDialog = new BottomSheetDialog(getContext());
+    BottomSheetDialog bottomSheetDialog = new BottomSheetDialog(requireContext());
     bottomSheetDialog.setContentView(addPhotoBottomSheetBinding.getRoot());
     bottomSheetDialog.setCancelable(true);
     bottomSheetDialog.show();
 
-    AddPhotoDialogAdapter.ItemClickListener listener =
-        type -> {
-          bottomSheetDialog.dismiss();
-          switch (type) {
-            case PHOTO_SOURCE_CAMERA:
-              viewModel.showPhotoCapture(field);
-              break;
-            case PHOTO_SOURCE_STORAGE:
-              viewModel.showPhotoSelector(field);
-              break;
-            default:
-              throw new IllegalArgumentException("Unknown type: " + type);
-          }
-        };
-
     RecyclerView recyclerView = addPhotoBottomSheetBinding.recyclerView;
     recyclerView.setHasFixedSize(true);
     recyclerView.setLayoutManager(new LinearLayoutManager(getContext()));
-    recyclerView.setAdapter(new AddPhotoDialogAdapter(listener));
+    recyclerView.setAdapter(
+        new AddPhotoDialogAdapter(
+            type -> {
+              bottomSheetDialog.dismiss();
+              onSelectPhotoClick(type, field);
+            }));
+  }
+
+  private void onSelectPhotoClick(int type, Field field) {
+    switch (type) {
+      case PHOTO_SOURCE_CAMERA:
+        viewModel.showPhotoCapture(field);
+        break;
+      case PHOTO_SOURCE_STORAGE:
+        viewModel.showPhotoSelector(field);
+        break;
+      default:
+        throw new IllegalArgumentException("Unknown type: " + type);
+    }
   }
 
   @Override
@@ -294,7 +314,7 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
   }
 
   private void showUnsavedChangesDialog() {
-    new AlertDialog.Builder(getContext())
+    new AlertDialog.Builder(requireContext())
         .setMessage(R.string.unsaved_changes)
         .setPositiveButton(R.string.close_without_saving, (d, i) -> navigator.navigateUp())
         .setNegativeButton(R.string.continue_editing, (d, i) -> {})
@@ -303,7 +323,7 @@ public class EditObservationFragment extends AbstractFragment implements BackPre
   }
 
   private void showValidationErrorsAlert() {
-    new AlertDialog.Builder(getContext())
+    new AlertDialog.Builder(requireContext())
         .setMessage(R.string.invalid_data_warning)
         .setPositiveButton(R.string.invalid_data_confirm, (a, b) -> {})
         .create()

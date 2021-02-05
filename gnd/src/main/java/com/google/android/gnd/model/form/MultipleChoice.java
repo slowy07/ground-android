@@ -21,7 +21,6 @@ import static java8.util.stream.StreamSupport.stream;
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import java8.util.Optional;
-import javax.annotation.Nullable;
 
 /** A {@link Field} with pre-defined options for the user to choose from. */
 @AutoValue
@@ -37,7 +36,6 @@ public abstract class MultipleChoice {
     return stream(getOptions()).filter(o -> o.getId().equals(id)).findFirst();
   }
 
-  @Nullable
   public abstract Cardinality getCardinality();
 
   public Optional<Integer> getIndex(String id) {
@@ -57,9 +55,7 @@ public abstract class MultipleChoice {
   public abstract static class Builder {
     public abstract Builder setOptions(ImmutableList<Option> newOptions);
 
-    public abstract ImmutableList.Builder<Option> optionsBuilder();
-
-    public abstract Builder setCardinality(@Nullable Cardinality newCardinality);
+    public abstract Builder setCardinality(Cardinality newCardinality);
 
     public abstract MultipleChoice build();
   }

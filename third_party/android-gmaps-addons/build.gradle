@@ -7,16 +7,20 @@ android {
         minSdkVersion 15
         targetSdkVersion 28
     }
-    
+
     sourceSets {
         main {
             manifest.srcFile 'AndroidManifest.xml'
             java.srcDirs = ['src']
         }
     }
+    buildTypes {
+        staging {
+        }
+    }
 }
 
 dependencies {
-  implementation "com.google.android.gms:play-services-base:17.3.0"
+  implementation "com.google.android.gms:play-services-base:17.5.0"
   implementation "com.google.android.gms:play-services-maps:17.0.0"
 }
